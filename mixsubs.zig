@@ -131,15 +131,17 @@ pub fn main() !void {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
+    const stdout = std.io.getStdOut().writer();
+
     // Get command line arguments
     const args = try std.process.argsAlloc(allocator);
     defer std.process.argsFree(allocator, args);
 
     // Check if correct number of arguments provided
     if (args.len != 3) {
-        std.debug.print("Usage: {s} <video_dir> <output_dir>\n", .{args[0]});
-        std.debug.print("  video_dir: Directory containing video files and Subs subdirectory\n", .{});
-        std.debug.print("  output_dir: Directory where output files will be saved\n", .{});
+        try stdout.print("Usage: {s} <video_dir> <output_dir>\n", .{args[0]});
+        try stdout.print("  video_dir: Directory containing video files and Subs subdirectory\n", .{});
+        try stdout.print("  output_dir: Directory where output files will be saved\n", .{});
         std.process.exit(1);
     }
 
@@ -181,6 +183,7 @@ pub fn main() !void {
         const subtitle_file = constructSubtitlePath(allocator, resolved_video_dir, filename_no_ext) catch |err| {
             if (err == error.NoSubtitleFileFound) {
                 // Copy the video file instead of adding subtitles
+                try stdout.print("No subtitle file found for {s}.\n", .{video_file});
                 try std.fs.copyFileAbsolute(video_file, output_file, .{});
                 continue;
             }
