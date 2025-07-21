@@ -50,7 +50,7 @@ pub fn addSubtitlesToVideo(
     }
 }
 
-/// Constructs the subtitle file path by finding the first subtitle file
+/// Constructs the subtitle file path by finding the best subtitle file
 ///
 /// Args:
 ///   allocator: Memory allocator
@@ -77,12 +77,29 @@ pub fn constructSubtitlePath(
     };
     defer subs_dir.close();
 
-    // Find the first subtitle file
+    // Look for subtitle files, prioritizing English ones
     var iter = subs_dir.iterate();
+    var first_srt: ?[]const u8 = null;
+
     while (try iter.next()) |entry| {
-        if (entry.kind == .file and std.mem.endsWith(u8, entry.name, ".srt")) {
+        // Check if filename contains "english" (case-insensitive)
+        const lower_name = try allocator.alloc(u8, entry.name.len);
+        defer allocator.free(lower_name);
+        _ = std.ascii.lowerString(lower_name, entry.name);
+
+        if (std.mem.indexOf(u8, lower_name, "english") != null) {
             return std.fmt.allocPrint(allocator, "{s}/{s}", .{ subs_dir_path, entry.name });
         }
+
+        // Remember the first subtitle file as fallback
+        if (first_srt == null) {
+            first_srt = entry.name;
+        }
+    }
+
+    // If no English subtitle found, return the first subtitle file
+    if (first_srt) |srt_name| {
+        return std.fmt.allocPrint(allocator, "{s}/{s}", .{ subs_dir_path, srt_name });
     }
 
     return error.NoSubtitleFileFound;
