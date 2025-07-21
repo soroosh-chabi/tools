@@ -21,8 +21,19 @@ pub fn main() !void {
         return error.MissingArgument;
     };
 
+    // Get current working directory once
+    const cwd = try std.process.getCwdAlloc(allocator);
+    defer allocator.free(cwd);
+
+    // Resolve relative paths to absolute paths
+    const resolved_dir_path = if (std.fs.path.isAbsolute(dir_path))
+        dir_path
+    else
+        try std.fs.path.resolve(allocator, &[_][]const u8{ cwd, dir_path });
+    defer if (!std.fs.path.isAbsolute(dir_path)) allocator.free(resolved_dir_path);
+
     // Open directory
-    var dir = try std.fs.openDirAbsolute(dir_path, .{ .iterate = true });
+    var dir = try std.fs.openDirAbsolute(resolved_dir_path, .{ .iterate = true });
     defer dir.close();
 
     // Count files and store names
