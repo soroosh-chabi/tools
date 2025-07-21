@@ -125,7 +125,23 @@ pub const Mp4FileIterator = struct {
     }
 };
 
-/// Example usage function
+/// Extracts the season number from a video directory name
+///
+/// Args:
+///   dir_name: The directory name (e.g., "Rick and Morty S06")
+///
+/// Returns:
+///   The index where the season number starts (e.g., "S06") or null if not found
+pub fn extractSeasonNumber(dir_name: []const u8) ?usize {
+    // Look for pattern like "S06" in the directory name
+    for (0..dir_name.len - 2) |i| {
+        if (dir_name[i] == 'S' and std.ascii.isDigit(dir_name[i + 1]) and std.ascii.isDigit(dir_name[i + 2])) {
+            return i;
+        }
+    }
+    return null;
+}
+
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}).init;
     defer _ = gpa.deinit();
@@ -138,15 +154,21 @@ pub fn main() !void {
     defer std.process.argsFree(allocator, args);
 
     // Check if correct number of arguments provided
-    if (args.len != 3) {
-        try stdout.print("Usage: {s} <video_dir> <output_dir>\n", .{args[0]});
+    if (args.len != 2) {
+        try stdout.print("Usage: {s} <video_dir>\n", .{args[0]});
         try stdout.print("  video_dir: Directory containing video files and Subs subdirectory\n", .{});
-        try stdout.print("  output_dir: Directory where output files will be saved\n", .{});
         std.process.exit(1);
     }
 
     const video_dir = args[1];
-    const output_dir = args[2];
+
+    // Extract season number
+    const video_dir_basename = std.fs.path.basename(video_dir);
+    const season_index = extractSeasonNumber(video_dir_basename) orelse {
+        try stdout.print("No season number found in directory name: {s}\n", .{video_dir_basename});
+        std.process.exit(1);
+    };
+    const season_number = video_dir_basename[season_index .. season_index + 3];
 
     // Get current working directory once
     const cwd = try std.process.getCwdAlloc(allocator);
@@ -159,11 +181,13 @@ pub fn main() !void {
         try std.fs.path.resolve(allocator, &[_][]const u8{ cwd, video_dir });
     defer if (!std.fs.path.isAbsolute(video_dir)) allocator.free(resolved_video_dir);
 
-    const resolved_output_dir = if (std.fs.path.isAbsolute(output_dir))
-        output_dir
-    else
-        try std.fs.path.resolve(allocator, &[_][]const u8{ cwd, output_dir });
-    defer if (!std.fs.path.isAbsolute(output_dir)) allocator.free(resolved_output_dir);
+    // Use season number as output directory in the same directory as video_dir
+    const video_dir_parent = std.fs.path.dirname(resolved_video_dir).?;
+    const output_dir = try std.fs.path.resolve(allocator, &[_][]const u8{ video_dir_parent, season_number });
+    defer allocator.free(output_dir);
+
+    // Create output directory
+    try std.fs.makeDirAbsolute(output_dir);
 
     var mp4_iter = try Mp4FileIterator.init(allocator, resolved_video_dir);
     defer mp4_iter.deinit();
@@ -176,7 +200,7 @@ pub fn main() !void {
         const filename_no_ext = basename[0 .. basename.len - 4]; // remove .mp4
 
         // Construct output file path following the pattern
-        const output_file = try std.fmt.allocPrint(allocator, "{s}/{s}.mp4", .{ resolved_output_dir, filename_no_ext });
+        const output_file = try std.fmt.allocPrint(allocator, "{s}/{s}.mp4", .{ output_dir, filename_no_ext });
         defer allocator.free(output_file);
 
         // Construct subtitle path following the pattern
