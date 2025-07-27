@@ -35,20 +35,20 @@ const Credentials = struct {
     pub const max_length = 1024;
 
     allocator: std.mem.Allocator,
-    username: []const u8 = undefined,
-    password: []const u8 = undefined,
-    totp_secret: []const u8 = undefined,
-    config_name: []const u8 = undefined,
+    username: ?[]const u8 = null,
+    password: ?[]const u8 = null,
+    totp_secret: ?[]const u8 = null,
+    config_name: ?[]const u8 = null,
 
     pub fn deinit(self: Credentials) void {
-        self.allocator.free(self.username);
-        self.allocator.free(self.password);
-        self.allocator.free(self.totp_secret);
-        self.allocator.free(self.config_name);
+        if (self.username) |username| self.allocator.free(username);
+        if (self.password) |password| self.allocator.free(password);
+        if (self.totp_secret) |totp_secret| self.allocator.free(totp_secret);
+        if (self.config_name) |config_name| self.allocator.free(config_name);
     }
 
     fn serialize(self: Credentials, writer: anytype) !void {
-        try writer.print("username={s}\npassword={s}\ntotp_secret={s}\nconfig_name={s}\n", .{ self.username, self.password, self.totp_secret, self.config_name });
+        try writer.print("username={s}\npassword={s}\ntotp_secret={s}\nconfig_name={s}\n", .{ self.username orelse "", self.password orelse "", self.totp_secret orelse "", self.config_name orelse "" });
     }
 
     fn deserialize(self: *Credentials, reader: anytype) !void {
@@ -168,7 +168,7 @@ const EncryptedCredentialsFile = struct {
 
         // Encrypt
         var tag: [AesGcm.tag_length]u8 = undefined;
-        AesGcm.encrypt(encrypted[salt_length + AesGcm.nonce_length ..], &tag, data, "", nonce, key);
+        AesGcm.encrypt(encrypted[salt_length + AesGcm.nonce_length .. salt_length + AesGcm.nonce_length + data.len], &tag, data, "", nonce, key);
         @memcpy(encrypted[salt_length + AesGcm.nonce_length + data.len ..], &tag);
 
         // Return a copy of the encrypted data
@@ -193,6 +193,7 @@ const EncryptedCredentialsFile = struct {
 
         // Decrypt directly into result
         const decrypted = try self.allocator.alloc(u8, encrypted.len);
+        errdefer self.allocator.free(decrypted);
         try AesGcm.decrypt(decrypted, encrypted, tag, "", nonce, key);
 
         return decrypted;
@@ -215,7 +216,7 @@ const EncryptedCredentialsFile = struct {
         defer self.allocator.free(encrypted);
 
         // Save encrypted data to file
-        const file = try std.fs.cwd().createFile(self.file_path, .{});
+        const file = try std.fs.createFileAbsolute(self.file_path, .{});
         defer file.close();
 
         try file.writeAll(encrypted);
@@ -223,7 +224,7 @@ const EncryptedCredentialsFile = struct {
 
     pub fn load(self: *EncryptedCredentialsFile) !void {
         // Read encrypted data from file
-        const file = try std.fs.cwd().openFile(self.file_path, .{});
+        const file = try std.fs.openFileAbsolute(self.file_path, .{});
         defer file.close();
 
         const encrypted_data = try file.reader().readAllAlloc(self.allocator, 1024 * 1024);
@@ -263,7 +264,15 @@ pub fn main() !void {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    var cred_file = try EncryptedCredentialsFile.init(allocator, "credentials.enc");
+    // Get current working directory and create absolute path
+    const cwd = try std.fs.cwd().realpathAlloc(allocator, ".");
+    defer allocator.free(cwd);
+
+    const cred_filename = "credentials.enc";
+    const cred_path = try std.fs.path.join(allocator, &[_][]const u8{ cwd, cred_filename });
+    defer allocator.free(cred_path);
+
+    var cred_file = try EncryptedCredentialsFile.init(allocator, cred_path);
     defer cred_file.deinit();
 
     if (cred_file.exists()) {
@@ -276,8 +285,8 @@ pub fn main() !void {
         std.debug.print("Saved encrypted credentials to file\n", .{});
     }
 
-    std.debug.print("Username: {s}\n", .{cred_file.credentials.username});
-    std.debug.print("Password: {s}\n", .{cred_file.credentials.password});
-    std.debug.print("TOTP Secret: {s}\n", .{cred_file.credentials.totp_secret});
-    std.debug.print("Config Name: {s}\n", .{cred_file.credentials.config_name});
+    std.debug.print("Username: {s}\n", .{cred_file.credentials.username orelse "N/A"});
+    std.debug.print("Password: {s}\n", .{cred_file.credentials.password orelse "N/A"});
+    std.debug.print("TOTP Secret: {s}\n", .{cred_file.credentials.totp_secret orelse "N/A"});
+    std.debug.print("Config Name: {s}\n", .{cred_file.credentials.config_name orelse "N/A"});
 }
