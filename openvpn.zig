@@ -52,6 +52,8 @@ const Credentials = struct {
     }
 
     fn deserialize(self: *Credentials, reader: anytype) !void {
+        self.deinit();
+
         // Read entire content and parse key=value pairs without loops
         const content = try reader.readAllAlloc(self.allocator, (max_length + 20) * 4);
         defer self.allocator.free(content);
@@ -79,35 +81,32 @@ const Credentials = struct {
     }
 
     fn ask(self: *Credentials) !void {
+        self.deinit();
+
         const stdin = std.io.getStdIn();
         const stdout = std.io.getStdOut();
 
         // Get username
         try stdout.writeAll("Enter username: ");
-        const username = try stdin.reader().readUntilDelimiterAlloc(
+        self.username = try stdin.reader().readUntilDelimiterAlloc(
             self.allocator,
             '\n',
             Credentials.max_length,
         );
 
         // Get password (without echo)
-        const password = try askSecret(self.allocator, "Enter password: ", Credentials.max_length);
+        self.password = try askSecret(self.allocator, "Enter password: ", Credentials.max_length);
 
         // Get TOTP secret (without echo)
-        const totp_secret = try askSecret(self.allocator, "Enter TOTP secret: ", Credentials.max_length);
+        self.totp_secret = try askSecret(self.allocator, "Enter TOTP secret: ", Credentials.max_length);
 
         // Get config name
         try stdout.writeAll("Enter config name: ");
-        const config_name = try stdin.reader().readUntilDelimiterAlloc(
+        self.config_name = try stdin.reader().readUntilDelimiterAlloc(
             self.allocator,
             '\n',
             Credentials.max_length,
         );
-
-        self.username = username;
-        self.password = password;
-        self.totp_secret = totp_secret;
-        self.config_name = config_name;
     }
 };
 
@@ -120,7 +119,7 @@ const EncryptedCredentialsFile = struct {
     const salt_length = 16;
 
     pub fn init(allocator: std.mem.Allocator, file_path: []const u8) !EncryptedCredentialsFile {
-        return EncryptedCredentialsFile{
+        return .{
             .file_path = try allocator.dupe(u8, file_path),
             .credentials = Credentials{ .allocator = allocator },
             .allocator = allocator,
