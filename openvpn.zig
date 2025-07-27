@@ -57,33 +57,25 @@ const Credentials = struct {
         defer self.allocator.free(content);
 
         // Parse each field directly using string operations
-        if (std.mem.indexOf(u8, content, "username=")) |username_start| {
-            const username_line_start = username_start + 9; // "username=".len
-            if (std.mem.indexOf(u8, content[username_line_start..], "\n")) |username_end| {
-                self.username = try self.allocator.dupe(u8, content[username_line_start .. username_line_start + username_end]);
-            }
-        }
+        const username_start = std.mem.indexOf(u8, content, "username=") orelse return error.MissingUsername;
+        const username_line_start = username_start + 9; // "username=".len
+        const username_end = std.mem.indexOf(u8, content[username_line_start..], "\n") orelse return error.MissingUsername;
+        self.username = try self.allocator.dupe(u8, content[username_line_start .. username_line_start + username_end]);
 
-        if (std.mem.indexOf(u8, content, "password=")) |password_start| {
-            const password_line_start = password_start + 9; // "password=".len
-            if (std.mem.indexOf(u8, content[password_line_start..], "\n")) |password_end| {
-                self.password = try self.allocator.dupe(u8, content[password_line_start .. password_line_start + password_end]);
-            }
-        }
+        const password_start = std.mem.indexOf(u8, content, "password=") orelse return error.MissingPassword;
+        const password_line_start = password_start + 9; // "password=".len
+        const password_end = std.mem.indexOf(u8, content[password_line_start..], "\n") orelse return error.MissingPassword;
+        self.password = try self.allocator.dupe(u8, content[password_line_start .. password_line_start + password_end]);
 
-        if (std.mem.indexOf(u8, content, "totp_secret=")) |totp_start| {
-            const totp_line_start = totp_start + 12; // "totp_secret=".len
-            if (std.mem.indexOf(u8, content[totp_line_start..], "\n")) |totp_end| {
-                self.totp_secret = try self.allocator.dupe(u8, content[totp_line_start .. totp_line_start + totp_end]);
-            }
-        }
+        const totp_start = std.mem.indexOf(u8, content, "totp_secret=") orelse return error.MissingTotpSecret;
+        const totp_line_start = totp_start + 12; // "totp_secret=".len
+        const totp_end = std.mem.indexOf(u8, content[totp_line_start..], "\n") orelse return error.MissingTotpSecret;
+        self.totp_secret = try self.allocator.dupe(u8, content[totp_line_start .. totp_line_start + totp_end]);
 
-        if (std.mem.indexOf(u8, content, "config_name=")) |config_start| {
-            const config_line_start = config_start + 12; // "config_name=".len
-            if (std.mem.indexOf(u8, content[config_line_start..], "\n")) |config_end| {
-                self.config_name = try self.allocator.dupe(u8, content[config_line_start .. config_line_start + config_end]);
-            }
-        }
+        const config_start = std.mem.indexOf(u8, content, "config_name=") orelse return error.MissingConfigName;
+        const config_line_start = config_start + 12; // "config_name=".len
+        const config_end = std.mem.indexOf(u8, content[config_line_start..], "\n") orelse return error.MissingConfigName;
+        self.config_name = try self.allocator.dupe(u8, content[config_line_start .. config_line_start + config_end]);
     }
 
     fn ask(self: *Credentials) !void {
