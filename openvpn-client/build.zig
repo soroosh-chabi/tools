@@ -3,26 +3,23 @@ const std = @import("std");
 pub fn build(b: *std.Build) void {
     const exe = b.addExecutable(.{
         .name = "openvpn-client",
-        .root_source_file = .{ .path = "client.zig" },
+        .root_module = b.createModule(.{
+            .optimize = b.standardOptimizeOption(.{}),
+            .root_source_file = b.path("client.zig"),
+            .target = b.standardTargetOptions(.{}),
+        }),
     });
 
     // Add C standard library
     exe.linkLibC();
 
     // Add GIO dependencies using pkg-config
-    exe.addLibraryPath(.{ .cwd_relative = "system" });
     exe.linkSystemLibrary("gio-2.0");
-    exe.linkSystemLibrary("gobject-2.0");
-    exe.linkSystemLibrary("glib-2.0");
-
-    // Add include directories
-    exe.addIncludeDir(.{ .path = "/usr/include/glib-2.0" });
-    exe.addIncludeDir(.{ .path = "/usr/lib/x86_64-linux-gnu/glib-2.0/include" });
-    exe.addIncludeDir(.{ .path = "/usr/include/libmount" });
-    exe.addIncludeDir(.{ .path = "/usr/include/blkid" });
+    // exe.linkSystemLibrary("gobject-2.0");
+    // exe.linkSystemLibrary("glib-2.0");
 
     // Add pthread for threading support
-    exe.linkSystemLibrary("pthread");
+    // exe.linkSystemLibrary("pthread");
 
     b.installArtifact(exe);
 
