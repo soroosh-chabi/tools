@@ -1,6 +1,10 @@
 const std = @import("std");
 const crypto = std.crypto;
 
+const gio = @cImport({
+    @cInclude("gio/gio.h");
+});
+
 fn askSecret(allocator: std.mem.Allocator, prompt: []const u8, max_length: usize) ![]const u8 {
     const stdin = std.io.getStdIn();
     const stdout = std.io.getStdOut();
@@ -280,4 +284,6 @@ pub fn main() !void {
     std.debug.print("Password: {s}\n", .{cred_file.credentials.password orelse "N/A"});
     std.debug.print("TOTP Secret: {s}\n", .{cred_file.credentials.totp_secret orelse "N/A"});
     std.debug.print("Config Name: {s}\n", .{cred_file.credentials.config_name orelse "N/A"});
+
+    _ = gio.g_dbus_proxy_new_for_bus_sync(gio.G_BUS_TYPE_SYSTEM, gio.G_DBUS_PROXY_FLAGS_NONE, null, "org.freedesktop.NetworkManager", "/org/freedesktop/NetworkManager/VPN/Connection", "org.freedesktop.NetworkManager.VPN.Connection", null, null);
 }
