@@ -260,7 +260,7 @@ const EncryptedCredentialsFile = struct {
     }
 };
 
-fn getConfigPath(allocator: std.mem.Allocator, config_name: []const u8) ![]const u8 {
+fn getConfigPath(config_name: [*:0]const u8) ![*:0]u8 {
     const proxy = gio.g_dbus_proxy_new_for_bus_sync(
         gio.G_BUS_TYPE_SYSTEM,
         gio.G_DBUS_PROXY_FLAGS_NONE,
@@ -273,14 +273,10 @@ fn getConfigPath(allocator: std.mem.Allocator, config_name: []const u8) ![]const
     ) orelse return error.FailedToConnectToOpenvpn3ServiceConfigmgr;
     defer gio.g_object_unref(proxy);
 
-    // Convert []const u8 to null-terminated string for C function
-    const c_config_name = try allocator.dupeZ(u8, config_name);
-    defer allocator.free(c_config_name);
-
     const result = gio.g_dbus_proxy_call_sync(
         proxy,
         "LookupConfigName",
-        gio.g_variant_new("(s)", c_config_name.ptr),
+        gio.g_variant_new("(s)", config_name),
         gio.G_DBUS_CALL_FLAGS_NONE,
         -1,
         null,
@@ -291,9 +287,35 @@ fn getConfigPath(allocator: std.mem.Allocator, config_name: []const u8) ![]const
     defer gio.g_variant_unref(config_paths);
     var config_path: [*:0]u8 = undefined;
     gio.g_variant_get_child(config_paths, 0, "o", &config_path);
-    defer gio.g_free(@ptrCast(config_path));
-    const path_slice = std.mem.span(config_path);
-    return try allocator.dupe(u8, path_slice);
+    return config_path;
+}
+
+fn createNewTunnel(config_path: [*:0]const u8) ![*:0]u8 {
+    const proxy = gio.g_dbus_proxy_new_for_bus_sync(
+        gio.G_BUS_TYPE_SYSTEM,
+        gio.G_DBUS_PROXY_FLAGS_NONE,
+        null,
+        "net.openvpn.v3.sessions",
+        "/net/openvpn/v3/sessions",
+        "net.openvpn.v3.sessions",
+        null,
+        null,
+    ) orelse return error.FailedToConnectToOpenvpn3ServiceSessionmgr;
+    defer gio.g_object_unref(proxy);
+
+    const result = gio.g_dbus_proxy_call_sync(
+        proxy,
+        "NewTunnel",
+        gio.g_variant_new("(o)", config_path),
+        gio.G_DBUS_CALL_FLAGS_NONE,
+        -1,
+        null,
+        null,
+    ) orelse return error.FailedToConnectToOpenvpn3ServiceSessionmgr;
+    defer gio.g_variant_unref(result);
+    var session_path: [*:0]u8 = undefined;
+    gio.g_variant_get_child(result, 0, "o", &session_path);
+    return session_path;
 }
 
 // Example usage function
@@ -325,7 +347,13 @@ pub fn main() !void {
         try stdout.writeAll("Saved encrypted credentials to file\n");
     }
 
-    const config_path = try getConfigPath(allocator, cred_file.credentials.config_name orelse return error.MissingConfigName);
-    defer allocator.free(config_path);
-    std.debug.print("Config path: {s}\n", .{config_path});
+    // Convert []const u8 to null-terminated string for C function
+    const c_config_name = try allocator.dupeZ(u8, cred_file.credentials.config_name orelse return error.MissingConfigName);
+    defer allocator.free(c_config_name);
+
+    const config_path = try getConfigPath(c_config_name.ptr);
+    defer gio.g_free(config_path);
+    const session_path = try createNewTunnel(config_path);
+    defer gio.g_free(session_path);
+    std.debug.print("Session path: {s}\n", .{session_path});
 }
