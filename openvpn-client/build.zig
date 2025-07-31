@@ -5,7 +5,7 @@ pub fn build(b: *std.Build) void {
         .name = "openvpn-client",
         .root_module = b.createModule(.{
             .optimize = b.standardOptimizeOption(.{}),
-            .root_source_file = b.path("client.zig"),
+            .root_source_file = b.path("main.zig"),
             .target = b.standardTargetOptions(.{}),
         }),
     });
