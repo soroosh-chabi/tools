@@ -15,6 +15,42 @@ fn reportGError(g_error: ?*gio.GError) !void {
     }
 }
 
+const max_retries = 3;
+
+fn callWithRetry(
+    proxy: *gio.GDBusProxy,
+    method_name: [*:0]const u8,
+    params: ?*gio.GVariant,
+) !*gio.GVariant {
+    var g_error: ?*gio.GError = null;
+    var backoff: u32 = 1;
+    var retries: u32 = 0;
+    _ = gio.g_variant_ref_sink(params);
+    defer gio.g_variant_unref(params);
+    while (true) {
+        const result = gio.g_dbus_proxy_call_sync(
+            proxy,
+            method_name,
+            params,
+            gio.G_DBUS_CALL_FLAGS_NONE,
+            -1,
+            null,
+            &g_error,
+        );
+        if (g_error) |e| {
+            if (e.domain == gio.g_dbus_error_quark() and e.code == gio.G_DBUS_ERROR_UNKNOWN_METHOD and retries < max_retries) {
+                gio.g_error_free(e);
+                std.time.sleep(std.time.ns_per_ms * backoff);
+                backoff *= 2;
+                retries += 1;
+                continue;
+            }
+        }
+        try reportGError(g_error);
+        return result.?;
+    }
+}
+
 pub fn getConfigPath(config_name: [*:0]const u8) ![*:0]u8 {
     var g_error: ?*gio.GError = null;
     const proxy = gio.g_dbus_proxy_new_for_bus_sync(
@@ -30,16 +66,11 @@ pub fn getConfigPath(config_name: [*:0]const u8) ![*:0]u8 {
     try reportGError(g_error);
     defer gio.g_object_unref(proxy);
 
-    const result = gio.g_dbus_proxy_call_sync(
+    const result = try callWithRetry(
         proxy,
         "LookupConfigName",
         gio.g_variant_new("(s)", config_name),
-        gio.G_DBUS_CALL_FLAGS_NONE,
-        -1,
-        null,
-        &g_error,
     );
-    try reportGError(g_error);
     defer gio.g_variant_unref(result);
     const config_paths = gio.g_variant_get_child_value(result, 0);
     defer gio.g_variant_unref(config_paths);
@@ -63,16 +94,11 @@ pub fn createNewTunnel(config_path: [*:0]const u8) ![*:0]u8 {
     try reportGError(g_error);
     defer gio.g_object_unref(proxy);
 
-    const result = gio.g_dbus_proxy_call_sync(
+    const result = try callWithRetry(
         proxy,
         "NewTunnel",
         gio.g_variant_new("(o)", config_path),
-        gio.G_DBUS_CALL_FLAGS_NONE,
-        -1,
-        null,
-        &g_error,
     );
-    try reportGError(g_error);
     defer gio.g_variant_unref(result);
     var session_path: [*:0]u8 = undefined;
     gio.g_variant_get_child(result, 0, "o", &session_path);
