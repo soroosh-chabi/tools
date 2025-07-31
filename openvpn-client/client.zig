@@ -163,7 +163,14 @@ const EncryptedCredentialsFile = struct {
 
         // Encrypt
         var tag: [AesGcm.tag_length]u8 = undefined;
-        AesGcm.encrypt(encrypted[salt_length + AesGcm.nonce_length .. salt_length + AesGcm.nonce_length + data.len], &tag, data, "", nonce, key);
+        AesGcm.encrypt(
+            encrypted[salt_length + AesGcm.nonce_length .. salt_length + AesGcm.nonce_length + data.len],
+            &tag,
+            data,
+            "",
+            nonce,
+            key,
+        );
         @memcpy(encrypted[salt_length + AesGcm.nonce_length + data.len ..], &tag);
 
         // Return a copy of the encrypted data
@@ -253,11 +260,49 @@ const EncryptedCredentialsFile = struct {
     }
 };
 
+fn getConfigPath(allocator: std.mem.Allocator, config_name: []const u8) ![]const u8 {
+    const proxy = gio.g_dbus_proxy_new_for_bus_sync(
+        gio.G_BUS_TYPE_SYSTEM,
+        gio.G_DBUS_PROXY_FLAGS_NONE,
+        null,
+        "net.openvpn.v3.configuration",
+        "/net/openvpn/v3/configuration",
+        "net.openvpn.v3.configuration",
+        null,
+        null,
+    ) orelse return error.FailedToConnectToOpenvpn3ServiceConfigmgr;
+    defer gio.g_object_unref(proxy);
+
+    // Convert []const u8 to null-terminated string for C function
+    const c_config_name = try allocator.dupeZ(u8, config_name);
+    defer allocator.free(c_config_name);
+
+    const result = gio.g_dbus_proxy_call_sync(
+        proxy,
+        "LookupConfigName",
+        gio.g_variant_new("(s)", c_config_name.ptr),
+        gio.G_DBUS_CALL_FLAGS_NONE,
+        -1,
+        null,
+        null,
+    ) orelse return error.FailedToConnectToOpenvpn3ServiceConfigmgr;
+    defer gio.g_variant_unref(result);
+    const config_paths = gio.g_variant_get_child_value(result, 0);
+    defer gio.g_variant_unref(config_paths);
+    var config_path: [*:0]u8 = undefined;
+    gio.g_variant_get_child(config_paths, 0, "o", &config_path);
+    defer gio.g_free(@ptrCast(config_path));
+    const path_slice = std.mem.span(config_path);
+    return try allocator.dupe(u8, path_slice);
+}
+
 // Example usage function
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
+
+    const stdout = std.io.getStdOut();
 
     // Get current working directory and create absolute path
     const cwd = try std.fs.cwd().realpathAlloc(allocator, ".");
@@ -273,17 +318,14 @@ pub fn main() !void {
     if (cred_file.exists()) {
         // Load existing credentials
         try cred_file.load();
-        std.debug.print("Loaded encrypted credentials from file\n", .{});
+        try stdout.writeAll("Loaded encrypted credentials from file\n");
     } else {
         // Ask for new credentials and save them
         try cred_file.askAndSave();
-        std.debug.print("Saved encrypted credentials to file\n", .{});
+        try stdout.writeAll("Saved encrypted credentials to file\n");
     }
 
-    std.debug.print("Username: {s}\n", .{cred_file.credentials.username orelse "N/A"});
-    std.debug.print("Password: {s}\n", .{cred_file.credentials.password orelse "N/A"});
-    std.debug.print("TOTP Secret: {s}\n", .{cred_file.credentials.totp_secret orelse "N/A"});
-    std.debug.print("Config Name: {s}\n", .{cred_file.credentials.config_name orelse "N/A"});
-
-    _ = gio.g_dbus_proxy_new_for_bus_sync(gio.G_BUS_TYPE_SYSTEM, gio.G_DBUS_PROXY_FLAGS_NONE, null, "org.freedesktop.NetworkManager", "/org/freedesktop/NetworkManager/VPN/Connection", "org.freedesktop.NetworkManager.VPN.Connection", null, null);
+    const config_path = try getConfigPath(allocator, cred_file.credentials.config_name orelse return error.MissingConfigName);
+    defer allocator.free(config_path);
+    std.debug.print("Config path: {s}\n", .{config_path});
 }

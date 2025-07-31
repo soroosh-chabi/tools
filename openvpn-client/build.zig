@@ -13,10 +13,7 @@ pub fn build(b: *std.Build) void {
     // Add C standard library
     exe.linkLibC();
 
-    // Add GIO dependencies using pkg-config
     exe.linkSystemLibrary("gio-2.0");
-    // exe.linkSystemLibrary("gobject-2.0");
-    // exe.linkSystemLibrary("glib-2.0");
 
     // Add pthread for threading support
     // exe.linkSystemLibrary("pthread");
