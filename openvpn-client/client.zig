@@ -23,7 +23,7 @@ fn callWithRetry(
     params: ?*gio.GVariant,
 ) !*gio.GVariant {
     var g_error: ?*gio.GError = null;
-    var backoff: u32 = 1;
+    var backoff: u32 = 100;
     var retries: u32 = 0;
     _ = gio.g_variant_ref_sink(params);
     defer gio.g_variant_unref(params);
@@ -39,7 +39,7 @@ fn callWithRetry(
         );
         if (g_error) |e| {
             if (e.domain == gio.g_dbus_error_quark() and e.code == gio.G_DBUS_ERROR_UNKNOWN_METHOD and retries < max_retries) {
-                gio.g_error_free(e);
+                gio.g_clear_error(&g_error);
                 std.time.sleep(std.time.ns_per_ms * backoff);
                 backoff *= 2;
                 retries += 1;
