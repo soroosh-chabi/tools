@@ -36,18 +36,13 @@ pub fn main() !void {
 
     const config_path = try client.getConfigPath(c_config_name.ptr);
     defer client.gio.g_free(config_path);
-    const session = try client.createNewTunnel(config_path);
+    var session = try client.createNewTunnel(config_path);
     defer session.deinit() catch {};
 
-    const username = try allocator.dupeZ(u8, cred_file.credentials.username.?);
-    defer allocator.free(username);
-    const password = try allocator.dupeZ(u8, cred_file.credentials.password.?);
-    defer allocator.free(password);
-    const totp_secret = try allocator.dupeZ(u8, cred_file.credentials.totp_secret.?);
-    defer allocator.free(totp_secret);
-    try session.setInputs(.{
-        .username = username.ptr,
-        .password = password.ptr,
-        .totp_secret = totp_secret.ptr,
+    try session.setCredentials(allocator, .{
+        .username = cred_file.credentials.username.?,
+        .password = cred_file.credentials.password.?,
+        .totp_secret = cred_file.credentials.totp_secret.?,
     });
+    try session.setInputs();
 }
