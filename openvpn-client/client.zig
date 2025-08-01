@@ -132,6 +132,14 @@ pub const Session = struct {
             &g_error,
         );
         try reportGError(g_error);
+        _ = gio.g_signal_connect_data(
+            proxy,
+            "g-signal::StatusChange",
+            gio.G_CALLBACK(handleStatusChange),
+            null,
+            null,
+            gio.G_CONNECT_DEFAULT,
+        );
         return .{ .proxy = proxy };
     }
 
@@ -149,6 +157,16 @@ pub const Session = struct {
                 allocator.free(totp_secret);
             }
         }
+    }
+
+    fn handleStatusChange(
+        _: *gio.GDBusProxy,
+        sender_name: [*:0]u8,
+        signal_name: [*:0]u8,
+        _: *gio.GVariant,
+        _: gio.gpointer,
+    ) callconv(.c) void {
+        std.debug.print("Sender: {s}\nSignal: {s}\n", .{ sender_name, signal_name });
     }
 
     pub fn setCredentials(
@@ -186,6 +204,10 @@ pub const Session = struct {
         // Convert output to null-terminated string, trimming newline
         result.stdout[result.stdout.len - 1] = 0;
         return @ptrCast(result.stdout);
+    }
+
+    pub fn connect(self: Session) !void {
+        gio.g_variant_unref(try callWithRetry(self.proxy, "Connect", null));
     }
 
     fn disconnect(self: Session) !void {

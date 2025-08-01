@@ -45,4 +45,5 @@ pub fn main() !void {
         .totp_secret = cred_file.credentials.totp_secret.?,
     });
     try session.setInputs();
+    try session.connect();
 }
