@@ -31,12 +31,23 @@ pub fn main() !void {
     }
 
     // Convert []const u8 to null-terminated string for C function
-    const c_config_name = try allocator.dupeZ(u8, cred_file.credentials.config_name orelse return error.MissingConfigName);
+    const c_config_name = try allocator.dupeZ(u8, cred_file.credentials.config_name.?);
     defer allocator.free(c_config_name);
 
     const config_path = try client.getConfigPath(c_config_name.ptr);
     defer client.gio.g_free(config_path);
-    const session_path = try client.createNewTunnel(config_path);
-    defer client.gio.g_free(session_path);
-    std.debug.print("Session path: {s}\n", .{session_path});
+    const session = try client.createNewTunnel(config_path);
+    defer session.deinit() catch {};
+
+    const username = try allocator.dupeZ(u8, cred_file.credentials.username.?);
+    defer allocator.free(username);
+    const password = try allocator.dupeZ(u8, cred_file.credentials.password.?);
+    defer allocator.free(password);
+    const totp_secret = try allocator.dupeZ(u8, cred_file.credentials.totp_secret.?);
+    defer allocator.free(totp_secret);
+    try session.setInputs(.{
+        .username = username.ptr,
+        .password = password.ptr,
+        .totp_secret = totp_secret.ptr,
+    });
 }

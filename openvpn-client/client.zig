@@ -22,11 +22,17 @@ fn callWithRetry(
     method_name: [*:0]const u8,
     params: ?*gio.GVariant,
 ) !*gio.GVariant {
+    if (params) |p| {
+        _ = gio.g_variant_ref_sink(p);
+    }
+    defer {
+        if (params) |p| {
+            gio.g_variant_unref(p);
+        }
+    }
     var g_error: ?*gio.GError = null;
     var backoff: u32 = 100;
     var retries: u32 = 0;
-    _ = gio.g_variant_ref_sink(params);
-    defer gio.g_variant_unref(params);
     while (true) {
         const result = gio.g_dbus_proxy_call_sync(
             proxy,
@@ -79,7 +85,7 @@ pub fn getConfigPath(config_name: [*:0]const u8) ![*:0]u8 {
     return config_path;
 }
 
-pub fn createNewTunnel(config_path: [*:0]const u8) ![*:0]u8 {
+pub fn createNewTunnel(config_path: [*:0]const u8) !Session {
     var g_error: ?*gio.GError = null;
     const proxy = gio.g_dbus_proxy_new_for_bus_sync(
         gio.G_BUS_TYPE_SYSTEM,
@@ -102,5 +108,59 @@ pub fn createNewTunnel(config_path: [*:0]const u8) ![*:0]u8 {
     defer gio.g_variant_unref(result);
     var session_path: [*:0]u8 = undefined;
     gio.g_variant_get_child(result, 0, "o", &session_path);
-    return session_path;
+    defer gio.g_free(session_path);
+    return try Session.init(session_path);
 }
+
+pub const Session = struct {
+    pub const Credentials = struct {
+        username: [*:0]u8,
+        password: [*:0]u8,
+        totp_secret: [*:0]u8,
+    };
+
+    proxy: *gio.GDBusProxy,
+
+    fn init(session_path: [*:0]const u8) !Session {
+        var g_error: ?*gio.GError = null;
+        const proxy = gio.g_dbus_proxy_new_for_bus_sync(
+            gio.G_BUS_TYPE_SYSTEM,
+            gio.G_DBUS_PROXY_FLAGS_NONE,
+            null,
+            "net.openvpn.v3.sessions",
+            session_path,
+            "net.openvpn.v3.sessions",
+            null,
+            &g_error,
+        );
+        try reportGError(g_error);
+        return .{ .proxy = proxy };
+    }
+
+    pub fn deinit(self: Session) !void {
+        try self.disconnect();
+        gio.g_object_unref(self.proxy);
+    }
+
+    fn disconnect(self: Session) !void {
+        gio.g_variant_unref(try callWithRetry(self.proxy, "Disconnect", null));
+    }
+
+    pub fn setInputs(self: Session, credentials: Credentials) !void {
+        gio.g_variant_unref(try callWithRetry(
+            self.proxy,
+            "UserInputProvide",
+            gio.g_variant_new("(uuus)", @as(u32, 1), @as(u32, 1), @as(u32, 0), credentials.username),
+        ));
+        gio.g_variant_unref(try callWithRetry(
+            self.proxy,
+            "UserInputProvide",
+            gio.g_variant_new("(uuus)", @as(u32, 1), @as(u32, 1), @as(u32, 1), credentials.password),
+        ));
+        gio.g_variant_unref(try callWithRetry(
+            self.proxy,
+            "UserInputProvide",
+            gio.g_variant_new("(uuus)", @as(u32, 1), @as(u32, 4), @as(u32, 0), credentials.totp_secret),
+        ));
+    }
+};
