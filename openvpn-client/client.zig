@@ -57,60 +57,87 @@ fn callWithRetry(
     }
 }
 
-pub fn getConfigPath(config_name: [*:0]const u8) ![*:0]u8 {
-    var g_error: ?*gio.GError = null;
-    const proxy = gio.g_dbus_proxy_new_for_bus_sync(
-        gio.G_BUS_TYPE_SYSTEM,
-        gio.G_DBUS_PROXY_FLAGS_NONE,
-        null,
-        "net.openvpn.v3.configuration",
-        "/net/openvpn/v3/configuration",
-        "net.openvpn.v3.configuration",
-        null,
-        &g_error,
-    );
-    try reportGError(g_error);
-    defer gio.g_object_unref(proxy);
+pub const SessionFactory = struct {
+    config_mgr_proxy: *gio.GDBusProxy,
+    session_mgr_proxy: *gio.GDBusProxy,
+    allocator: std.mem.Allocator,
 
-    const result = try callWithRetry(
-        proxy,
-        "LookupConfigName",
-        gio.g_variant_new("(s)", config_name),
-    );
-    defer gio.g_variant_unref(result);
-    const config_paths = gio.g_variant_get_child_value(result, 0);
-    defer gio.g_variant_unref(config_paths);
-    var config_path: [*:0]u8 = undefined;
-    gio.g_variant_get_child(config_paths, 0, "o", &config_path);
-    return config_path;
-}
+    pub fn init(allocator: std.mem.Allocator) !SessionFactory {
+        return .{
+            .config_mgr_proxy = blk: {
+                var g_error: ?*gio.GError = null;
+                const proxy = gio.g_dbus_proxy_new_for_bus_sync(
+                    gio.G_BUS_TYPE_SYSTEM,
+                    gio.G_DBUS_PROXY_FLAGS_NONE,
+                    null,
+                    "net.openvpn.v3.configuration",
+                    "/net/openvpn/v3/configuration",
+                    "net.openvpn.v3.configuration",
+                    null,
+                    &g_error,
+                );
+                try reportGError(g_error);
+                break :blk proxy;
+            },
+            .session_mgr_proxy = blk: {
+                var g_error: ?*gio.GError = null;
+                const proxy = gio.g_dbus_proxy_new_for_bus_sync(
+                    gio.G_BUS_TYPE_SYSTEM,
+                    gio.G_DBUS_PROXY_FLAGS_NONE,
+                    null,
+                    "net.openvpn.v3.sessions",
+                    "/net/openvpn/v3/sessions",
+                    "net.openvpn.v3.sessions",
+                    null,
+                    &g_error,
+                );
+                try reportGError(g_error);
+                break :blk proxy;
+            },
+            .allocator = allocator,
+        };
+    }
 
-pub fn createNewTunnel(config_path: [*:0]const u8) !Session {
-    var g_error: ?*gio.GError = null;
-    const proxy = gio.g_dbus_proxy_new_for_bus_sync(
-        gio.G_BUS_TYPE_SYSTEM,
-        gio.G_DBUS_PROXY_FLAGS_NONE,
-        null,
-        "net.openvpn.v3.sessions",
-        "/net/openvpn/v3/sessions",
-        "net.openvpn.v3.sessions",
-        null,
-        &g_error,
-    );
-    try reportGError(g_error);
-    defer gio.g_object_unref(proxy);
+    pub fn deinit(self: SessionFactory) void {
+        gio.g_object_unref(self.config_mgr_proxy);
+        gio.g_object_unref(self.session_mgr_proxy);
+    }
 
-    const result = try callWithRetry(
-        proxy,
-        "NewTunnel",
-        gio.g_variant_new("(o)", config_path),
-    );
-    defer gio.g_variant_unref(result);
-    var session_path: [*:0]u8 = undefined;
-    gio.g_variant_get_child(result, 0, "o", &session_path);
-    defer gio.g_free(session_path);
-    return try Session.init(session_path);
-}
+    fn getConfigPath(self: SessionFactory, config_name: []const u8) ![*:0]u8 {
+        const config_name_c = try self.allocator.dupeZ(u8, config_name);
+        defer self.allocator.free(config_name_c);
+        const result = try callWithRetry(
+            self.config_mgr_proxy,
+            "LookupConfigName",
+            gio.g_variant_new("(s)", config_name_c.ptr),
+        );
+        defer gio.g_variant_unref(result);
+        const config_paths = gio.g_variant_get_child_value(result, 0);
+        defer gio.g_variant_unref(config_paths);
+        var config_path: [*:0]u8 = undefined;
+        gio.g_variant_get_child(config_paths, 0, "o", &config_path);
+        return config_path;
+    }
+
+    fn createNewTunnel(self: SessionFactory, config_path: [*:0]const u8) !Session {
+        const result = try callWithRetry(
+            self.session_mgr_proxy,
+            "NewTunnel",
+            gio.g_variant_new("(o)", config_path),
+        );
+        defer gio.g_variant_unref(result);
+        var session_path: [*:0]u8 = undefined;
+        gio.g_variant_get_child(result, 0, "o", &session_path);
+        defer gio.g_free(session_path);
+        return try Session.init(session_path);
+    }
+
+    pub fn newSession(self: SessionFactory, config_name: []const u8) !Session {
+        const config_path = try self.getConfigPath(config_name);
+        defer gio.g_free(config_path);
+        return try self.createNewTunnel(config_path);
+    }
+};
 
 pub const Session = struct {
     proxy: *gio.GDBusProxy,

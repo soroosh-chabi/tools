@@ -30,13 +30,10 @@ pub fn main() !void {
         try stdout.writeAll("Saved encrypted credentials to file\n");
     }
 
-    // Convert []const u8 to null-terminated string for C function
-    const c_config_name = try allocator.dupeZ(u8, cred_file.credentials.config_name.?);
-    defer allocator.free(c_config_name);
+    var session_factory = try client.SessionFactory.init(allocator);
+    defer session_factory.deinit();
 
-    const config_path = try client.getConfigPath(c_config_name.ptr);
-    defer client.gio.g_free(config_path);
-    var session = try client.createNewTunnel(config_path);
+    var session = try session_factory.newSession(cred_file.credentials.config_name.?);
     defer session.deinit() catch {};
 
     try session.setCredentials(allocator, .{
