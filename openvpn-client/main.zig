@@ -44,4 +44,15 @@ pub fn main() !void {
     try session.setInputs();
     try session.connect();
     defer session.disconnect() catch {};
+
+    const main_loop = client.gio.g_main_loop_new(null, @intFromBool(true));
+    defer client.gio.g_main_loop_unref(main_loop);
+    // Set up SIGINT handler to quit the mainloop
+    _ = client.gio.g_unix_signal_add(std.os.linux.SIG.INT, struct {
+        fn callback(user_data: ?*anyopaque) callconv(.C) c_int {
+            client.gio.g_main_loop_quit(@ptrCast(user_data));
+            return client.gio.G_SOURCE_REMOVE;
+        }
+    }.callback, main_loop);
+    client.gio.g_main_loop_run(main_loop);
 }

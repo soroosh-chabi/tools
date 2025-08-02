@@ -2,6 +2,7 @@ const std = @import("std");
 
 pub const gio = @cImport({
     @cInclude("gio/gio.h");
+    @cInclude("glib-unix.h");
 });
 
 fn reportGError(g_error: ?*gio.GError) !void {
