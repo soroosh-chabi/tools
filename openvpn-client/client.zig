@@ -129,7 +129,7 @@ pub const SessionFactory = struct {
         var session_path: [*:0]u8 = undefined;
         gio.g_variant_get_child(result, 0, "o", &session_path);
         defer gio.g_free(session_path);
-        return try Session.init(session_path);
+        return try Session.init(self.allocator, session_path);
     }
 
     pub fn newSession(self: SessionFactory, config_name: []const u8) !Session {
@@ -141,12 +141,12 @@ pub const SessionFactory = struct {
 
 pub const Session = struct {
     proxy: *gio.GDBusProxy,
+    allocator: std.mem.Allocator,
     username: ?[*:0]u8 = null,
     password: ?[*:0]u8 = null,
     totp_secret: ?[]u8 = null,
-    allocator: ?std.mem.Allocator = null,
 
-    fn init(session_path: [*:0]const u8) !Session {
+    fn init(allocator: std.mem.Allocator, session_path: [*:0]const u8) !Session {
         var g_error: ?*gio.GError = null;
         const proxy = gio.g_dbus_proxy_new_for_bus_sync(
             gio.G_BUS_TYPE_SYSTEM,
@@ -167,22 +167,19 @@ pub const Session = struct {
             null,
             gio.G_CONNECT_DEFAULT,
         );
-        return .{ .proxy = proxy };
+        return .{ .proxy = proxy, .allocator = allocator };
     }
 
-    pub fn deinit(self: Session) !void {
-        try self.disconnect();
+    pub fn deinit(self: Session) void {
         gio.g_object_unref(self.proxy);
-        if (self.allocator) |allocator| {
-            if (self.username) |username| {
-                allocator.free(std.mem.span(username));
-            }
-            if (self.password) |password| {
-                allocator.free(std.mem.span(password));
-            }
-            if (self.totp_secret) |totp_secret| {
-                allocator.free(totp_secret);
-            }
+        if (self.username) |username| {
+            self.allocator.free(std.mem.span(username));
+        }
+        if (self.password) |password| {
+            self.allocator.free(std.mem.span(password));
+        }
+        if (self.totp_secret) |totp_secret| {
+            self.allocator.free(totp_secret);
         }
     }
 
@@ -198,13 +195,11 @@ pub const Session = struct {
 
     pub fn setCredentials(
         self: *Session,
-        allocator: std.mem.Allocator,
         credentials: struct { username: []const u8, password: []const u8, totp_secret: []const u8 },
     ) !void {
-        self.allocator = allocator;
-        self.username = try allocator.dupeZ(u8, credentials.username);
-        self.password = try allocator.dupeZ(u8, credentials.password);
-        self.totp_secret = try allocator.dupe(u8, credentials.totp_secret);
+        self.username = try self.allocator.dupeZ(u8, credentials.username);
+        self.password = try self.allocator.dupeZ(u8, credentials.password);
+        self.totp_secret = try self.allocator.dupe(u8, credentials.totp_secret);
     }
 
     fn generateTotp(self: Session) ![*:0]u8 {
@@ -219,11 +214,11 @@ pub const Session = struct {
 
         // Execute oathtool and capture output
         const result = try std.process.Child.run(.{
-            .allocator = self.allocator.?,
+            .allocator = self.allocator,
             .argv = &argv,
         });
-        defer self.allocator.?.free(result.stderr);
-        errdefer self.allocator.?.free(result.stdout);
+        defer self.allocator.free(result.stderr);
+        errdefer self.allocator.free(result.stdout);
         if (result.stderr.len > 0) {
             try std.io.getStdOut().writer().print("Generating TOTP failed: {s}\n", .{result.stderr});
             return error.TOTPError;
@@ -237,7 +232,7 @@ pub const Session = struct {
         gio.g_variant_unref(try callWithRetry(self.proxy, "Connect", null));
     }
 
-    fn disconnect(self: Session) !void {
+    pub fn disconnect(self: Session) !void {
         gio.g_variant_unref(try callWithRetry(self.proxy, "Disconnect", null));
     }
 
@@ -253,7 +248,7 @@ pub const Session = struct {
             gio.g_variant_new("(uuus)", @as(u32, 1), @as(u32, 1), @as(u32, 1), self.password.?),
         ));
         const totp = try self.generateTotp();
-        defer self.allocator.?.free(std.mem.span(totp));
+        defer self.allocator.free(std.mem.span(totp));
         gio.g_variant_unref(try callWithRetry(
             self.proxy,
             "UserInputProvide",

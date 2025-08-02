@@ -34,13 +34,14 @@ pub fn main() !void {
     defer session_factory.deinit();
 
     var session = try session_factory.newSession(cred_file.credentials.config_name.?);
-    defer session.deinit() catch {};
+    defer session.deinit();
 
-    try session.setCredentials(allocator, .{
+    try session.setCredentials(.{
         .username = cred_file.credentials.username.?,
         .password = cred_file.credentials.password.?,
         .totp_secret = cred_file.credentials.totp_secret.?,
     });
     try session.setInputs();
     try session.connect();
+    defer session.disconnect() catch {};
 }
