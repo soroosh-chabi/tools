@@ -179,8 +179,8 @@ pub const Session = struct {
         try reportGError(g_error);
         if (gio.g_signal_connect_data(
             log_proxy,
-            "g-signal",
-            gio.G_CALLBACK(handleLogSignals),
+            "g-signal::StatusChange",
+            gio.G_CALLBACK(handleStatusChange),
             null,
             null,
             gio.G_CONNECT_DEFAULT,
@@ -208,14 +208,29 @@ pub const Session = struct {
         }
     }
 
-    fn handleLogSignals(
+    fn handleStatusChange(
         _: ?*gio.GDBusProxy,
         _: [*:0]u8,
         _: [*:0]u8,
-        _: ?*gio.GVariant,
+        parameters: ?*gio.GVariant,
         _: ?*anyopaque,
     ) callconv(.c) void {
-        std.debug.print("Signal received\n", .{});
+        var code_major: u32 = undefined;
+        var code_minor: u32 = undefined;
+        var message: [*:0]u8 = undefined;
+        gio.g_variant_get(parameters, "(uus)", &code_major, &code_minor, &message);
+        defer gio.g_free(message);
+        if (code_major == 2) {
+            switch (code_minor) {
+                2 => return,
+                6 => std.debug.print("Connecting...\n", .{}),
+                7 => std.debug.print("Connected.\n", .{}),
+                11 => std.debug.print("Authentication failed. Disconnecting...\n", .{}),
+                else => std.debug.print("Status change: {d}.{d}: {s}\n", .{ code_major, code_minor, message }),
+            }
+        } else {
+            std.debug.print("Status change: {d}.{d}: {s}\n", .{ code_major, code_minor, message });
+        }
     }
 
     pub fn setCredentials(
