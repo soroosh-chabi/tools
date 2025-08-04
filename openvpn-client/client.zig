@@ -141,7 +141,8 @@ pub const SessionFactory = struct {
 };
 
 pub const Session = struct {
-    proxy: *gio.GDBusProxy,
+    session_proxy: *gio.GDBusProxy,
+    log_proxy: *gio.GDBusProxy,
     allocator: std.mem.Allocator,
     username: ?[*:0]u8 = null,
     password: ?[*:0]u8 = null,
@@ -149,7 +150,7 @@ pub const Session = struct {
 
     fn init(allocator: std.mem.Allocator, session_path: [*:0]const u8) !Session {
         var g_error: ?*gio.GError = null;
-        const proxy = gio.g_dbus_proxy_new_for_bus_sync(
+        const session_proxy = gio.g_dbus_proxy_new_for_bus_sync(
             gio.G_BUS_TYPE_SYSTEM,
             gio.G_DBUS_PROXY_FLAGS_NONE,
             null,
@@ -160,19 +161,42 @@ pub const Session = struct {
             &g_error,
         );
         try reportGError(g_error);
-        _ = gio.g_signal_connect_data(
-            proxy,
-            "g-signal::StatusChange",
-            gio.G_CALLBACK(handleStatusChange),
+        _ = try callWithRetry(
+            session_proxy,
+            "LogForward",
+            gio.g_variant_new("(b)", gio.TRUE),
+        );
+        const log_proxy = gio.g_dbus_proxy_new_for_bus_sync(
+            gio.G_BUS_TYPE_SYSTEM,
+            gio.G_DBUS_PROXY_FLAGS_NONE,
+            null,
+            "net.openvpn.v3.log",
+            session_path,
+            "net.openvpn.v3.backends",
+            null,
+            &g_error,
+        );
+        try reportGError(g_error);
+        if (gio.g_signal_connect_data(
+            log_proxy,
+            "g-signal",
+            gio.G_CALLBACK(handleLogSignals),
             null,
             null,
             gio.G_CONNECT_DEFAULT,
-        );
-        return .{ .proxy = proxy, .allocator = allocator };
+        ) <= 0) {
+            return error.GError;
+        }
+        return .{
+            .session_proxy = session_proxy,
+            .log_proxy = log_proxy,
+            .allocator = allocator,
+        };
     }
 
     pub fn deinit(self: Session) void {
-        gio.g_object_unref(self.proxy);
+        gio.g_object_unref(self.session_proxy);
+        gio.g_object_unref(self.log_proxy);
         if (self.username) |username| {
             self.allocator.free(std.mem.span(username));
         }
@@ -184,14 +208,14 @@ pub const Session = struct {
         }
     }
 
-    fn handleStatusChange(
-        _: *gio.GDBusProxy,
-        sender_name: [*:0]u8,
-        signal_name: [*:0]u8,
-        _: *gio.GVariant,
-        _: gio.gpointer,
+    fn handleLogSignals(
+        _: ?*gio.GDBusProxy,
+        _: [*:0]u8,
+        _: [*:0]u8,
+        _: ?*gio.GVariant,
+        _: ?*anyopaque,
     ) callconv(.c) void {
-        std.debug.print("Sender: {s}\nSignal: {s}\n", .{ sender_name, signal_name });
+        std.debug.print("Signal received\n", .{});
     }
 
     pub fn setCredentials(
@@ -229,29 +253,38 @@ pub const Session = struct {
         return @ptrCast(result.stdout);
     }
 
-    pub fn connect(self: Session) !void {
-        gio.g_variant_unref(try callWithRetry(self.proxy, "Connect", null));
+    pub fn connect(self: Session) void {
+        gio.g_dbus_proxy_call(
+            self.session_proxy,
+            "Connect",
+            null,
+            gio.G_DBUS_CALL_FLAGS_NONE,
+            -1,
+            null,
+            null,
+            null,
+        );
     }
 
     pub fn disconnect(self: Session) !void {
-        gio.g_variant_unref(try callWithRetry(self.proxy, "Disconnect", null));
+        gio.g_variant_unref(try callWithRetry(self.session_proxy, "Disconnect", null));
     }
 
     pub fn setInputs(self: Session) !void {
         gio.g_variant_unref(try callWithRetry(
-            self.proxy,
+            self.session_proxy,
             "UserInputProvide",
             gio.g_variant_new("(uuus)", @as(u32, 1), @as(u32, 1), @as(u32, 0), self.username.?),
         ));
         gio.g_variant_unref(try callWithRetry(
-            self.proxy,
+            self.session_proxy,
             "UserInputProvide",
             gio.g_variant_new("(uuus)", @as(u32, 1), @as(u32, 1), @as(u32, 1), self.password.?),
         ));
         const totp = try self.generateTotp();
         defer self.allocator.free(std.mem.span(totp));
         gio.g_variant_unref(try callWithRetry(
-            self.proxy,
+            self.session_proxy,
             "UserInputProvide",
             gio.g_variant_new("(uuus)", @as(u32, 1), @as(u32, 4), @as(u32, 0), totp),
         ));
