@@ -1,2 +1,4 @@
 /.zig-cache/
+/zig-out/
 /credentials.enc
+/credentials-wrong.enc

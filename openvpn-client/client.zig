@@ -5,13 +5,13 @@ pub const gio = @cImport({
     @cInclude("glib-unix.h");
 });
 
-fn reportGError(g_error: ?*gio.GError) !void {
+fn reportGError(g_error: ?*gio.GError) error{GError}!void {
     if (g_error) |e| {
         defer gio.g_error_free(e);
-        try std.io.getStdOut().writer().print(
+        std.io.getStdOut().writer().print(
             "Error:\n\tdomain: {s}\n\tcode: {d}\n\tmessage: {s}\n",
             .{ gio.g_quark_to_string(e.domain), e.code, e.message },
-        );
+        ) catch {};
         return error.GError;
     }
 }
@@ -220,16 +220,19 @@ pub const Session = struct {
         var message: [*:0]u8 = undefined;
         gio.g_variant_get(parameters, "(uus)", &code_major, &code_minor, &message);
         defer gio.g_free(message);
+        const stdOut = std.io.getStdOut().writer();
         if (code_major == 2) {
             switch (code_minor) {
-                2 => return,
-                6 => std.debug.print("Connecting...\n", .{}),
-                7 => std.debug.print("Connected.\n", .{}),
-                11 => std.debug.print("Authentication failed. Disconnecting...\n", .{}),
-                else => std.debug.print("Status change: {d}.{d}: {s}\n", .{ code_major, code_minor, message }),
+                2, 16 => return,
+                6 => stdOut.writeAll("Connecting...\n") catch {},
+                7 => stdOut.writeAll("Connected.\n") catch {},
+                8 => stdOut.writeAll("Disconnecting...\n") catch {},
+                9 => stdOut.writeAll("Disconnected.\n") catch {},
+                11 => stdOut.writeAll("Authentication failed. Disconnecting...\n") catch {},
+                else => stdOut.print("Status change: {d}.{d}: {s}\n", .{ code_major, code_minor, message }) catch {},
             }
         } else {
-            std.debug.print("Status change: {d}.{d}: {s}\n", .{ code_major, code_minor, message });
+            stdOut.print("Status change: {d}.{d}: {s}\n", .{ code_major, code_minor, message }) catch {};
         }
     }
 
@@ -281,8 +284,37 @@ pub const Session = struct {
         );
     }
 
-    pub fn disconnect(self: Session) !void {
-        gio.g_variant_unref(try callWithRetry(self.session_proxy, "Disconnect", null));
+    pub fn disconnect(self: Session, cb: *const fn (user_data: ?*anyopaque, result: error{GError}!void) void, user_data: ?*anyopaque) !void {
+        const Closure = struct {
+            closure_cb: *const fn (user_data: ?*anyopaque, err: error{GError}!void) void,
+            closure_user_data: ?*anyopaque,
+            allocator: std.mem.Allocator,
+            fn callback(source_object: ?*gio.GObject, res: ?*gio.GAsyncResult, callback_user_data: ?*anyopaque) callconv(.c) void {
+                const callback_closure: *@This() = @alignCast(@ptrCast(callback_user_data));
+                defer callback_closure.allocator.destroy(callback_closure);
+                var g_error: ?*gio.GError = null;
+                const result_variant = gio.g_dbus_proxy_call_finish(@ptrCast(source_object), res, &g_error);
+                const result = reportGError(g_error);
+                if (result) |_| {
+                    gio.g_variant_unref(result_variant);
+                } else |_| {}
+                callback_closure.closure_cb(callback_closure.closure_user_data, result);
+            }
+        };
+        const closure = try self.allocator.create(Closure);
+        closure.closure_cb = cb;
+        closure.closure_user_data = user_data;
+        closure.allocator = self.allocator;
+        gio.g_dbus_proxy_call(
+            self.session_proxy,
+            "Disconnect",
+            null,
+            gio.G_DBUS_CALL_FLAGS_NONE,
+            -1,
+            null,
+            Closure.callback,
+            closure,
+        );
     }
 
     pub fn setInputs(self: Session) !void {

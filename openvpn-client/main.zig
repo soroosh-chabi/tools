@@ -49,13 +49,31 @@ pub fn main() !void {
     });
     try session.setInputs();
 
-    // Set up SIGINT handler to quit the mainloop
-    _ = client.gio.g_unix_signal_add(std.os.linux.SIG.INT, struct {
+    const SigIntClosure = struct {
+        const SigIntClosure = @This();
+        closure_session: *client.Session,
+        closure_main_loop: *client.gio.GMainLoop,
         fn callback(user_data: ?*anyopaque) callconv(.c) c_int {
-            client.gio.g_main_loop_quit(@ptrCast(user_data));
+            const self: *const SigIntClosure = @alignCast(@ptrCast(user_data));
+            self.closure_session.disconnect(struct {
+                fn callback(disconnect_user_data: ?*anyopaque, _: error{GError}!void) void {
+                    const disconnect_self: *const SigIntClosure = @alignCast(@ptrCast(disconnect_user_data));
+                    client.gio.g_main_loop_quit(disconnect_self.closure_main_loop);
+                }
+            }.callback, user_data) catch {
+                std.debug.print("Error disconnecting.\n", .{});
+            };
             return client.gio.G_SOURCE_REMOVE;
         }
-    }.callback, main_loop);
+    };
+    var sigint_closure = SigIntClosure{ .closure_session = &session, .closure_main_loop = main_loop.? };
+
+    // Set up SIGINT handler to quit the mainloop
+    _ = client.gio.g_unix_signal_add(
+        std.os.linux.SIG.INT,
+        SigIntClosure.callback,
+        &sigint_closure,
+    );
 
     // Schedule connect to be called when the main loop is idle
     _ = client.gio.g_idle_add_once(struct {
@@ -65,6 +83,5 @@ pub fn main() !void {
         }
     }.callback, &session);
 
-    defer session.disconnect() catch {};
     client.gio.g_main_loop_run(main_loop);
 }
