@@ -31,7 +31,7 @@ fn askSecret(allocator: std.mem.Allocator, prompt: []const u8, max_length: usize
     return secret;
 }
 
-const Credentials = struct {
+pub const Credentials = struct {
     pub const max_length = 1024;
 
     allocator: std.mem.Allocator,
@@ -110,9 +110,8 @@ const Credentials = struct {
     }
 };
 
-pub const EncryptedCredentialsFile = struct {
+const EncryptedCredentialsFile = struct {
     file_path: []const u8,
-    credentials: Credentials,
     allocator: std.mem.Allocator,
 
     const AesGcm = crypto.aead.aes_gcm.Aes256Gcm;
@@ -121,13 +120,11 @@ pub const EncryptedCredentialsFile = struct {
     pub fn init(allocator: std.mem.Allocator, file_path: []const u8) !EncryptedCredentialsFile {
         return .{
             .file_path = try allocator.dupe(u8, file_path),
-            .credentials = Credentials{ .allocator = allocator },
             .allocator = allocator,
         };
     }
 
     pub fn deinit(self: *EncryptedCredentialsFile) void {
-        self.credentials.deinit();
         self.allocator.free(self.file_path);
     }
 
@@ -197,13 +194,13 @@ pub const EncryptedCredentialsFile = struct {
         return decrypted;
     }
 
-    fn save(self: *EncryptedCredentialsFile) !void {
+    pub fn save(self: *EncryptedCredentialsFile, credentials: Credentials) !void {
         // Serialize credentials to string
         var buffer = std.ArrayList(u8).init(self.allocator);
         defer buffer.deinit();
 
         const writer = buffer.writer();
-        try self.credentials.serialize(writer);
+        try credentials.serialize(writer);
 
         // Ask for master password
         const master_password = try askSecret(self.allocator, "Enter master password to encrypt credentials: ", Credentials.max_length);
@@ -220,7 +217,7 @@ pub const EncryptedCredentialsFile = struct {
         try file.writeAll(encrypted);
     }
 
-    pub fn load(self: *EncryptedCredentialsFile) !void {
+    pub fn load(self: *EncryptedCredentialsFile) !Credentials {
         // Read encrypted data from file
         const file = try std.fs.openFileAbsolute(self.file_path, .{});
         defer file.close();
@@ -239,19 +236,37 @@ pub const EncryptedCredentialsFile = struct {
         // Parse the decrypted data
         var stream = std.io.fixedBufferStream(decrypted);
         const reader = stream.reader();
-        try self.credentials.deserialize(reader);
+        var credentials = Credentials{ .allocator = self.allocator };
+        try credentials.deserialize(reader);
+        return credentials;
     }
 
-    pub fn exists(self: *EncryptedCredentialsFile) bool {
-        if (std.fs.cwd().access(self.file_path, .{})) {
-            return true;
-        } else |_| {
-            return false;
+    pub fn getCredentials(self: *EncryptedCredentialsFile) !Credentials {
+        if (self.load()) |credentials| {
+            return credentials;
+        } else |err| switch (err) {
+            error.FileNotFound => {
+                var credentials = Credentials{ .allocator = self.allocator };
+                try credentials.ask();
+                try self.save(credentials);
+                return credentials;
+            },
+            else => return err,
         }
     }
-
-    pub fn askAndSave(self: *EncryptedCredentialsFile) !void {
-        try self.credentials.ask();
-        try self.save();
-    }
 };
+
+pub fn getCredentials(allocator: std.mem.Allocator) !Credentials {
+    // Get current working directory and create absolute path
+    const cwd = try std.fs.cwd().realpathAlloc(allocator, ".");
+    defer allocator.free(cwd);
+
+    const cred_filename = "credentials.enc";
+    const cred_path = try std.fs.path.join(allocator, &[_][]const u8{ cwd, cred_filename });
+    defer allocator.free(cred_path);
+
+    var cred_file = try EncryptedCredentialsFile.init(allocator, cred_path);
+    defer cred_file.deinit();
+
+    return try cred_file.getCredentials();
+}
