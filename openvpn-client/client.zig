@@ -343,16 +343,16 @@ const DisconnectQuitClosure = struct {
 
 const RetryingAsyncTask = struct {
     backoff_ms: gio.guint = 100,
-    user_data: ?*anyopaque,
+    client: *OpenVPNClient,
     start: *const fn (task: *RetryingAsyncTask) anyerror!void,
     allocator: std.mem.Allocator,
 
-    fn init(allocator: std.mem.Allocator, start: *const fn (task: *RetryingAsyncTask) anyerror!void, user_data: ?*anyopaque) !*RetryingAsyncTask {
-        const task = try allocator.create(RetryingAsyncTask);
-        task.start = start;
-        task.user_data = user_data;
-        task.allocator = allocator;
-        return task;
+    fn init(allocator: std.mem.Allocator, start: *const fn (task: *RetryingAsyncTask) anyerror!void, client: *OpenVPNClient) !*RetryingAsyncTask {
+        const self = try allocator.create(RetryingAsyncTask);
+        self.start = start;
+        self.client = client;
+        self.allocator = allocator;
+        return self;
     }
 
     fn deinit(self: *RetryingAsyncTask) void {
@@ -438,8 +438,7 @@ pub const OpenVPNClient = struct {
         const task: *RetryingAsyncTask = @alignCast(@ptrCast(user_data));
         if (task.will_retry(g_error)) return;
         defer task.deinit();
-        const self: *OpenVPNClient = @alignCast(@ptrCast(task.user_data));
-        self.config_mgr_proxy = proxy;
+        task.client.config_mgr_proxy = proxy;
     }
 
     pub fn connect(self: *OpenVPNClient) !void {
