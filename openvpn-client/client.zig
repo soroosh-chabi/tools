@@ -330,11 +330,18 @@ const RetryingAsyncTask = struct {
     backoff_ms: gio.guint = default_backoff_ms,
     client: *OpenVPNClient,
     start: *const fn (task: *RetryingAsyncTask) anyerror!void,
+    ready: *const fn (task: *RetryingAsyncTask, source_object: ?*gio.GObject, res: ?*gio.GAsyncResult) anyerror!void,
     allocator: std.mem.Allocator,
 
-    fn init(allocator: std.mem.Allocator, start: *const fn (task: *RetryingAsyncTask) anyerror!void, client: *OpenVPNClient) *RetryingAsyncTask {
+    fn init(
+        allocator: std.mem.Allocator,
+        start: *const fn (task: *RetryingAsyncTask) anyerror!void,
+        ready: *const fn (task: *RetryingAsyncTask, source_object: ?*gio.GObject, res: ?*gio.GAsyncResult) anyerror!void,
+        client: *OpenVPNClient,
+    ) *RetryingAsyncTask {
         const self = allocator.create(RetryingAsyncTask) catch @panic("Failed to create retrying async task");
         self.start = start;
+        self.ready = ready;
         self.client = client;
         self.allocator = allocator;
         return self;
@@ -344,8 +351,13 @@ const RetryingAsyncTask = struct {
         self.allocator.destroy(self);
     }
 
-    fn reuseWith(self: *RetryingAsyncTask, start: *const fn (task: *RetryingAsyncTask) anyerror!void) void {
+    fn reuseWith(
+        self: *RetryingAsyncTask,
+        start: *const fn (task: *RetryingAsyncTask) anyerror!void,
+        ready: *const fn (task: *RetryingAsyncTask, source_object: ?*gio.GObject, res: ?*gio.GAsyncResult) anyerror!void,
+    ) void {
         self.start = start;
+        self.ready = ready;
         self.reuse();
     }
 
@@ -353,9 +365,17 @@ const RetryingAsyncTask = struct {
         self.backoff_ms = default_backoff_ms;
     }
 
-    fn callback(user_data: ?*anyopaque) callconv(.c) void {
+    fn start_callback(user_data: ?*anyopaque) callconv(.c) void {
         const self: *RetryingAsyncTask = @alignCast(@ptrCast(user_data));
         self.start(self) catch |err| {
+            std.io.getStdOut().writer().print("Error: {}\n", .{err}) catch {};
+            self.scheduleRetry();
+        };
+    }
+
+    fn ready_callback(source_object: ?*gio.GObject, res: ?*gio.GAsyncResult, user_data: ?*anyopaque) callconv(.c) void {
+        const self: *RetryingAsyncTask = @alignCast(@ptrCast(user_data));
+        self.ready(self, source_object, res) catch |err| {
             std.io.getStdOut().writer().print("Error: {}\n", .{err}) catch {};
             self.scheduleRetry();
         };
@@ -372,7 +392,7 @@ const RetryingAsyncTask = struct {
     fn scheduleRetry(self: *RetryingAsyncTask) void {
         _ = gio.g_timeout_add_once(
             self.backoff_ms,
-            callback,
+            start_callback,
             self,
         );
         self.backoff_ms *= 2;
@@ -421,19 +441,18 @@ pub const OpenVPNClient = struct {
             "/net/openvpn/v3/configuration",
             "net.openvpn.v3.configuration",
             null,
-            createConfigMgrProxyCallback,
+            RetryingAsyncTask.ready_callback,
             task,
         );
     }
 
-    fn createConfigMgrProxyCallback(_: ?*gio.GObject, res: ?*gio.GAsyncResult, user_data: ?*anyopaque) callconv(.c) void {
+    fn createConfigMgrProxyReady(task: *RetryingAsyncTask, _: ?*gio.GObject, res: ?*gio.GAsyncResult) !void {
         var g_error: ?*gio.GError = null;
         const proxy = gio.g_dbus_proxy_new_for_bus_finish(res, &g_error);
-        const task: *RetryingAsyncTask = @alignCast(@ptrCast(user_data));
         if (task.will_retry(g_error)) return;
         task.client.config_mgr_proxy = proxy;
-        task.reuseWith(lookupConfigPath);
-        RetryingAsyncTask.callback(user_data);
+        task.reuseWith(lookupConfigPath, lookupConfigPathReady);
+        RetryingAsyncTask.start_callback(task);
     }
 
     fn lookupConfigPath(task: *RetryingAsyncTask) !void {
@@ -444,13 +463,12 @@ pub const OpenVPNClient = struct {
             gio.G_DBUS_CALL_FLAGS_NONE,
             -1,
             null,
-            lookupConfigPathCallback,
+            RetryingAsyncTask.ready_callback,
             task,
         );
     }
 
-    fn lookupConfigPathCallback(source_object: ?*gio.GObject, res: ?*gio.GAsyncResult, user_data: ?*anyopaque) callconv(.c) void {
-        const task: *RetryingAsyncTask = @alignCast(@ptrCast(user_data));
+    fn lookupConfigPathReady(task: *RetryingAsyncTask, source_object: ?*gio.GObject, res: ?*gio.GAsyncResult) !void {
         var g_error: ?*gio.GError = null;
         const result = gio.g_dbus_proxy_call_finish(@ptrCast(source_object), res, &g_error);
         if (task.will_retry(g_error)) return;
@@ -477,8 +495,8 @@ pub const OpenVPNClient = struct {
         );
 
         _ = gio.g_idle_add_once(
-            RetryingAsyncTask.callback,
-            RetryingAsyncTask.init(self.allocator, createConfigMgrProxy, self),
+            RetryingAsyncTask.start_callback,
+            RetryingAsyncTask.init(self.allocator, createConfigMgrProxy, createConfigMgrProxyReady, self),
         );
 
         gio.g_main_loop_run(self.main_loop);
