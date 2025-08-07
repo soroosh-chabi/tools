@@ -59,27 +59,11 @@ fn callWithRetry(
 }
 
 pub const SessionFactory = struct {
-    config_mgr_proxy: *gio.GDBusProxy,
     session_mgr_proxy: *gio.GDBusProxy,
     allocator: std.mem.Allocator,
 
     pub fn init(allocator: std.mem.Allocator) !SessionFactory {
         return .{
-            .config_mgr_proxy = blk: {
-                var g_error: ?*gio.GError = null;
-                const proxy = gio.g_dbus_proxy_new_for_bus_sync(
-                    gio.G_BUS_TYPE_SYSTEM,
-                    gio.G_DBUS_PROXY_FLAGS_NONE,
-                    null,
-                    "net.openvpn.v3.configuration",
-                    "/net/openvpn/v3/configuration",
-                    "net.openvpn.v3.configuration",
-                    null,
-                    &g_error,
-                );
-                try reportGError(g_error);
-                break :blk proxy;
-            },
             .session_mgr_proxy = blk: {
                 var g_error: ?*gio.GError = null;
                 const proxy = gio.g_dbus_proxy_new_for_bus_sync(
@@ -100,7 +84,6 @@ pub const SessionFactory = struct {
     }
 
     pub fn deinit(self: SessionFactory) void {
-        gio.g_object_unref(self.config_mgr_proxy);
         gio.g_object_unref(self.session_mgr_proxy);
     }
 
@@ -372,11 +355,11 @@ const NewProxyClosure = struct {
         return closure;
     }
 
-    fn callback(source_object: ?*gio.GObject, res: ?*gio.GAsyncResult, user_data: ?*anyopaque) callconv(.c) void {
+    fn callback(_: ?*gio.GObject, res: ?*gio.GAsyncResult, user_data: ?*anyopaque) callconv(.c) void {
         const self: *NewProxyClosure = @alignCast(@ptrCast(user_data));
         defer self.allocator.destroy(self);
         var g_error: ?*gio.GError = null;
-        const proxy = gio.g_dbus_proxy_call_finish(source_object, res, &g_error);
+        const proxy = gio.g_dbus_proxy_new_for_bus_finish(res, &g_error);
         reportGError(g_error) catch {};
         self.result_callback(self.client, proxy);
     }
@@ -389,6 +372,7 @@ pub const OpenVPNClient = struct {
     totp_secret: []u8,
     config_name: [*:0]const u8,
     main_loop: ?*gio.GMainLoop = null,
+    config_mgr_proxy: ?*gio.GDBusProxy = null,
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -409,6 +393,9 @@ pub const OpenVPNClient = struct {
         self.allocator.free(std.mem.span(self.password));
         self.allocator.free(self.totp_secret);
         self.allocator.free(std.mem.span(self.config_name));
+        if (self.config_mgr_proxy) |p| {
+            gio.g_object_unref(p);
+        }
     }
 
     fn newProxy(self: *OpenVPNClient, name: [*:0]const u8, object_path: [*:0]const u8, interface_name: [*:0]const u8, callback: NewProxyCallback) !void {
@@ -425,14 +412,26 @@ pub const OpenVPNClient = struct {
         );
     }
 
-    fn sigIntCallback(user_data: ?*anyopaque) callconv(.c) c_int {
+    fn createConfigMgrProxy(user_data: ?*anyopaque) callconv(.c) void {
         const self: *OpenVPNClient = @alignCast(@ptrCast(user_data));
-        gio.g_main_loop_quit(self.main_loop);
-        return gio.G_SOURCE_REMOVE;
+        self.newProxy(
+            "net.openvpn.v3.configuration",
+            "/net/openvpn/v3/configuration",
+            "net.openvpn.v3.configuration",
+            configMgrProxyCallback,
+        ) catch {
+            std.io.getStdOut().writer().writeAll("Failed to create proxy for configuration manager. Retrying...\n") catch {};
+            _ = gio.g_idle_add_once(createConfigMgrProxy, self);
+        };
     }
 
-    fn createConfigMgrProxy(_: ?*anyopaque) callconv(.c) void {
-        //const self: *OpenVPNClient = @alignCast(@ptrCast(user_data));
+    fn configMgrProxyCallback(self: *OpenVPNClient, proxy: ?*gio.GDBusProxy) void {
+        if (proxy) |p| {
+            self.config_mgr_proxy = p;
+        } else {
+            std.io.getStdOut().writer().writeAll("Failed to create proxy for configuration manager. Retrying...\n") catch {};
+            _ = gio.g_idle_add_once(createConfigMgrProxy, self);
+        }
     }
 
     pub fn connect(self: *OpenVPNClient) !void {
@@ -448,9 +447,14 @@ pub const OpenVPNClient = struct {
             self,
         );
 
-        // Schedule connect to be called when the main loop is idle
         _ = gio.g_idle_add_once(createConfigMgrProxy, self);
 
         gio.g_main_loop_run(self.main_loop);
+    }
+
+    fn sigIntCallback(user_data: ?*anyopaque) callconv(.c) c_int {
+        const self: *OpenVPNClient = @alignCast(@ptrCast(user_data));
+        gio.g_main_loop_quit(self.main_loop);
+        return gio.G_SOURCE_REMOVE;
     }
 };
