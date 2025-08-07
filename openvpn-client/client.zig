@@ -58,55 +58,6 @@ fn callWithRetry(
     }
 }
 
-pub const SessionFactory = struct {
-    session_mgr_proxy: *gio.GDBusProxy,
-    allocator: std.mem.Allocator,
-
-    pub fn init(allocator: std.mem.Allocator) !SessionFactory {
-        return .{
-            .session_mgr_proxy = blk: {
-                var g_error: ?*gio.GError = null;
-                const proxy = gio.g_dbus_proxy_new_for_bus_sync(
-                    gio.G_BUS_TYPE_SYSTEM,
-                    gio.G_DBUS_PROXY_FLAGS_NONE,
-                    null,
-                    "net.openvpn.v3.sessions",
-                    "/net/openvpn/v3/sessions",
-                    "net.openvpn.v3.sessions",
-                    null,
-                    &g_error,
-                );
-                try reportGError(g_error);
-                break :blk proxy;
-            },
-            .allocator = allocator,
-        };
-    }
-
-    pub fn deinit(self: SessionFactory) void {
-        gio.g_object_unref(self.session_mgr_proxy);
-    }
-
-    fn createNewTunnel(self: SessionFactory, config_path: [*:0]const u8) !Session {
-        const result = try callWithRetry(
-            self.session_mgr_proxy,
-            "NewTunnel",
-            gio.g_variant_new("(o)", config_path),
-        );
-        defer gio.g_variant_unref(result);
-        var session_path: [*:0]u8 = undefined;
-        gio.g_variant_get_child(result, 0, "o", &session_path);
-        defer gio.g_free(session_path);
-        return try Session.init(self.allocator, session_path);
-    }
-
-    pub fn newSession(self: SessionFactory, config_name: []const u8) !Session {
-        const config_path = try self.getConfigPath(config_name);
-        defer gio.g_free(config_path);
-        return try self.createNewTunnel(config_path);
-    }
-};
-
 pub const Session = struct {
     session_proxy: *gio.GDBusProxy,
     log_proxy: *gio.GDBusProxy,
@@ -407,6 +358,9 @@ pub const OpenVPNClient = struct {
     config_name: [*:0]const u8,
     main_loop: ?*gio.GMainLoop = null,
     config_mgr_proxy: ?*gio.GDBusProxy = null,
+    config_path: ?[*:0]u8 = null,
+    session_mgr_proxy: ?*gio.GDBusProxy = null,
+    session_path: ?[*:0]u8 = null,
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -429,6 +383,15 @@ pub const OpenVPNClient = struct {
         self.allocator.free(std.mem.span(self.config_name));
         if (self.config_mgr_proxy) |p| {
             gio.g_object_unref(p);
+        }
+        if (self.config_path) |p| {
+            gio.free(p);
+        }
+        if (self.session_mgr_proxy) |p| {
+            gio.g_object_unref(p);
+        }
+        if (self.session_path) |p| {
+            gio.free(p);
         }
     }
 
@@ -473,12 +436,69 @@ pub const OpenVPNClient = struct {
         const result = gio.g_dbus_proxy_call_finish(@ptrCast(source_object), res, &g_error);
         if (task.will_retry(g_error)) return;
         defer gio.g_variant_unref(result);
+        gio.g_object_unref(task.client.config_mgr_proxy);
+        task.client.config_mgr_proxy = null;
         const config_paths = gio.g_variant_get_child_value(result, 0);
         defer gio.g_variant_unref(config_paths);
-        var config_path: [*:0]u8 = undefined;
-        gio.g_variant_get_child(config_paths, 0, "o", &config_path);
-        defer gio.g_free(config_path);
-        std.debug.print("Config path: {s}\n", .{config_path});
+        gio.g_variant_get_child(config_paths, 0, "o", &task.client.config_path);
+        createSessionOrFinishTask(task);
+    }
+
+    fn createSessionMgrProxy(task: *RetryingAsyncTask) !void {
+        gio.g_dbus_proxy_new_for_bus(
+            gio.G_BUS_TYPE_SYSTEM,
+            gio.G_DBUS_PROXY_FLAGS_NONE,
+            null,
+            "net.openvpn.v3.sessions",
+            "/net/openvpn/v3/sessions",
+            "net.openvpn.v3.sessions",
+            null,
+            RetryingAsyncTask.ready_callback,
+            task,
+        );
+    }
+
+    fn createSessionMgrProxyReady(task: *RetryingAsyncTask, _: ?*gio.GObject, res: ?*gio.GAsyncResult) !void {
+        var g_error: ?*gio.GError = null;
+        const proxy = gio.g_dbus_proxy_new_for_bus_finish(res, &g_error);
+        if (task.will_retry(g_error)) return;
+        task.client.session_mgr_proxy = proxy;
+        createSessionOrFinishTask(task);
+    }
+
+    fn createSessionOrFinishTask(task: *RetryingAsyncTask) void {
+        if (task.client.session_mgr_proxy == null or task.client.config_path == null) {
+            task.deinit();
+            return;
+        }
+        task.reuseWith(createSession, createSessionReady);
+        RetryingAsyncTask.start_callback(task);
+    }
+
+    fn createSession(task: *RetryingAsyncTask) !void {
+        gio.g_dbus_proxy_call(
+            task.client.session_mgr_proxy.?,
+            "NewTunnel",
+            gio.g_variant_new("(o)", task.client.config_path.?),
+            gio.G_DBUS_CALL_FLAGS_NONE,
+            -1,
+            null,
+            RetryingAsyncTask.ready_callback,
+            task,
+        );
+    }
+
+    fn createSessionReady(task: *RetryingAsyncTask, source_object: ?*gio.GObject, res: ?*gio.GAsyncResult) !void {
+        var g_error: ?*gio.GError = null;
+        const result = gio.g_dbus_proxy_call_finish(@ptrCast(source_object), res, &g_error);
+        if (task.will_retry(g_error)) return;
+        defer gio.g_variant_unref(result);
+        gio.g_free(task.client.config_path);
+        task.client.config_path = null;
+        gio.g_object_unref(task.client.session_mgr_proxy);
+        task.client.session_mgr_proxy = null;
+        gio.g_variant_get_child(result, 0, "o", &task.client.session_path);
+        task.deinit();
     }
 
     pub fn connect(self: *OpenVPNClient) !void {
@@ -497,6 +517,11 @@ pub const OpenVPNClient = struct {
         _ = gio.g_idle_add_once(
             RetryingAsyncTask.start_callback,
             RetryingAsyncTask.init(self.allocator, createConfigMgrProxy, createConfigMgrProxyReady, self),
+        );
+
+        _ = gio.g_idle_add_once(
+            RetryingAsyncTask.start_callback,
+            RetryingAsyncTask.init(self.allocator, createSessionMgrProxy, createSessionMgrProxyReady, self),
         );
 
         gio.g_main_loop_run(self.main_loop);
