@@ -357,3 +357,101 @@ pub const Session = struct {
         ));
     }
 };
+
+const SigIntClosure = struct {
+    session: *Session,
+    main_loop: *gio.GMainLoop,
+    allocator: std.mem.Allocator,
+
+    fn init(allocator: std.mem.Allocator, session: *Session, main_loop: *gio.GMainLoop) !*SigIntClosure {
+        const closure = try allocator.create(SigIntClosure);
+        closure.session = session;
+        closure.main_loop = main_loop;
+        closure.allocator = allocator;
+        return closure;
+    }
+
+    fn callback(user_data: ?*anyopaque) callconv(.c) c_int {
+        const self: *SigIntClosure = @alignCast(@ptrCast(user_data));
+        defer self.allocator.destroy(self);
+        self.session.disconnect(
+            DisconnectQuitClosure.callback,
+            DisconnectQuitClosure.init(self.allocator, self.main_loop) catch {
+                std.debug.print("Error disconnecting.\n", .{});
+                return gio.G_SOURCE_REMOVE;
+            },
+        ) catch {
+            std.debug.print("Error disconnecting.\n", .{});
+        };
+        return gio.G_SOURCE_REMOVE;
+    }
+};
+
+const DisconnectQuitClosure = struct {
+    main_loop: *gio.GMainLoop,
+    allocator: std.mem.Allocator,
+
+    fn init(allocator: std.mem.Allocator, main_loop: *gio.GMainLoop) !*DisconnectQuitClosure {
+        const closure = try allocator.create(DisconnectQuitClosure);
+        closure.main_loop = main_loop;
+        closure.allocator = allocator;
+        return closure;
+    }
+
+    fn callback(_: ?*gio.GVariant, err: ?*gio.GError, user_data: ?*anyopaque) void {
+        const self: *DisconnectQuitClosure = @alignCast(@ptrCast(user_data));
+        defer self.allocator.destroy(self);
+        defer gio.g_main_loop_quit(self.main_loop);
+        if (err) |_| {
+            std.debug.print("Error disconnecting.\n", .{});
+        }
+    }
+};
+
+pub fn connect(
+    allocator: std.mem.Allocator,
+    config_name: []const u8,
+    credentials: struct { username: []const u8, password: []const u8, totp_secret: []const u8 },
+) !void {
+    var session_factory = try SessionFactory.init(allocator);
+    defer session_factory.deinit();
+
+    const main_loop = gio.g_main_loop_new(
+        null,
+        gio.FALSE,
+    ) orelse return error.GError;
+    defer gio.g_main_loop_unref(main_loop);
+
+    var session = try session_factory.newSession(config_name);
+    defer session.deinit();
+
+    try session.setCredentials(.{
+        .username = credentials.username,
+        .password = credentials.password,
+        .totp_secret = credentials.totp_secret,
+    });
+
+    _ = gio.g_unix_signal_add(
+        std.os.linux.SIG.INT,
+        SigIntClosure.callback,
+        try SigIntClosure.init(allocator, &session, main_loop),
+    );
+
+    // Schedule connect to be called when the main loop is idle
+    _ = gio.g_idle_add_once(struct {
+        fn callback(user_data: ?*anyopaque) callconv(.c) void {
+            const session_ptr: *Session = @alignCast(@ptrCast(user_data));
+            session_ptr.connect(struct {
+                fn callback(_: ?*gio.GVariant, err: ?*gio.GError, _: ?*anyopaque) void {
+                    if (err) |_| {
+                        std.debug.print("Error connecting.\n", .{});
+                    }
+                }
+            }.callback, null) catch {
+                std.debug.print("Error connecting.\n", .{});
+            };
+        }
+    }.callback, &session);
+
+    gio.g_main_loop_run(main_loop);
+}
