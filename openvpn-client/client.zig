@@ -141,14 +141,11 @@ pub const SessionFactory = struct {
 };
 
 pub const Session = struct {
-    pub const ResultCallback = *const fn (result: ?*gio.GVariant, err: ?*gio.GError, user_data: ?*anyopaque) void;
     session_proxy: *gio.GDBusProxy,
     log_proxy: *gio.GDBusProxy,
     allocator: std.mem.Allocator,
-    username: ?[*:0]u8 = null,
-    password: ?[*:0]u8 = null,
-    totp_secret: ?[]u8 = null,
 
+    pub const ResultCallback = *const fn (result: ?*gio.GVariant, err: ?*gio.GError, user_data: ?*anyopaque) void;
     const GDBusCallClosure = struct {
         result_callback: ResultCallback,
         user_data: ?*anyopaque,
@@ -224,15 +221,6 @@ pub const Session = struct {
     pub fn deinit(self: Session) void {
         gio.g_object_unref(self.session_proxy);
         gio.g_object_unref(self.log_proxy);
-        if (self.username) |username| {
-            self.allocator.free(std.mem.span(username));
-        }
-        if (self.password) |password| {
-            self.allocator.free(std.mem.span(password));
-        }
-        if (self.totp_secret) |totp_secret| {
-            self.allocator.free(totp_secret);
-        }
     }
 
     fn handleStatusChange(
@@ -261,15 +249,6 @@ pub const Session = struct {
         } else {
             stdOut.print("Status change: {d}.{d}: {s}\n", .{ code_major, code_minor, message }) catch {};
         }
-    }
-
-    pub fn setCredentials(
-        self: *Session,
-        credentials: struct { username: []const u8, password: []const u8, totp_secret: []const u8 },
-    ) !void {
-        self.username = try self.allocator.dupeZ(u8, credentials.username);
-        self.password = try self.allocator.dupeZ(u8, credentials.password);
-        self.totp_secret = try self.allocator.dupe(u8, credentials.totp_secret);
     }
 
     fn generateTotp(self: Session) ![*:0]u8 {
@@ -358,35 +337,6 @@ pub const Session = struct {
     }
 };
 
-const SigIntClosure = struct {
-    session: *Session,
-    main_loop: *gio.GMainLoop,
-    allocator: std.mem.Allocator,
-
-    fn init(allocator: std.mem.Allocator, session: *Session, main_loop: *gio.GMainLoop) !*SigIntClosure {
-        const closure = try allocator.create(SigIntClosure);
-        closure.session = session;
-        closure.main_loop = main_loop;
-        closure.allocator = allocator;
-        return closure;
-    }
-
-    fn callback(user_data: ?*anyopaque) callconv(.c) c_int {
-        const self: *SigIntClosure = @alignCast(@ptrCast(user_data));
-        defer self.allocator.destroy(self);
-        self.session.disconnect(
-            DisconnectQuitClosure.callback,
-            DisconnectQuitClosure.init(self.allocator, self.main_loop) catch {
-                std.debug.print("Error disconnecting.\n", .{});
-                return gio.G_SOURCE_REMOVE;
-            },
-        ) catch {
-            std.debug.print("Error disconnecting.\n", .{});
-        };
-        return gio.G_SOURCE_REMOVE;
-    }
-};
-
 const DisconnectQuitClosure = struct {
     main_loop: *gio.GMainLoop,
     allocator: std.mem.Allocator,
@@ -408,50 +358,99 @@ const DisconnectQuitClosure = struct {
     }
 };
 
-pub fn connect(
+const NewProxyCallback = *const fn (self: *OpenVPNClient, proxy: ?*gio.GDBusProxy) void;
+const NewProxyClosure = struct {
+    client: *OpenVPNClient,
+    result_callback: NewProxyCallback,
     allocator: std.mem.Allocator,
-    config_name: []const u8,
-    credentials: struct { username: []const u8, password: []const u8, totp_secret: []const u8 },
-) !void {
-    var session_factory = try SessionFactory.init(allocator);
-    defer session_factory.deinit();
 
-    const main_loop = gio.g_main_loop_new(
-        null,
-        gio.FALSE,
-    ) orelse return error.GError;
-    defer gio.g_main_loop_unref(main_loop);
+    fn init(client: *OpenVPNClient, result_callback: NewProxyCallback, allocator: std.mem.Allocator) !*NewProxyClosure {
+        const closure = try allocator.create(NewProxyClosure);
+        closure.client = client;
+        closure.result_callback = result_callback;
+        closure.allocator = allocator;
+        return closure;
+    }
 
-    var session = try session_factory.newSession(config_name);
-    defer session.deinit();
+    fn callback(source_object: ?*gio.GObject, res: ?*gio.GAsyncResult, user_data: ?*anyopaque) callconv(.c) void {
+        const self: *NewProxyClosure = @alignCast(@ptrCast(user_data));
+        defer self.allocator.destroy(self);
+        var g_error: ?*gio.GError = null;
+        const proxy = gio.g_dbus_proxy_call_finish(source_object, res, &g_error);
+        reportGError(g_error) catch {};
+        self.result_callback(self.client, proxy);
+    }
+};
 
-    try session.setCredentials(.{
-        .username = credentials.username,
-        .password = credentials.password,
-        .totp_secret = credentials.totp_secret,
-    });
+pub const OpenVPNClient = struct {
+    allocator: std.mem.Allocator,
+    username: [*:0]u8,
+    password: [*:0]u8,
+    totp_secret: []u8,
+    config_name: [*:0]const u8,
+    main_loop: ?*gio.GMainLoop = null,
 
-    _ = gio.g_unix_signal_add(
-        std.os.linux.SIG.INT,
-        SigIntClosure.callback,
-        try SigIntClosure.init(allocator, &session, main_loop),
-    );
+    pub fn init(
+        allocator: std.mem.Allocator,
+        config_name: []const u8,
+        credentials: struct { username: []const u8, password: []const u8, totp_secret: []const u8 },
+    ) !OpenVPNClient {
+        return .{
+            .allocator = allocator,
+            .username = try allocator.dupeZ(u8, credentials.username),
+            .password = try allocator.dupeZ(u8, credentials.password),
+            .totp_secret = try allocator.dupe(u8, credentials.totp_secret),
+            .config_name = try allocator.dupeZ(u8, config_name),
+        };
+    }
 
-    // Schedule connect to be called when the main loop is idle
-    _ = gio.g_idle_add_once(struct {
-        fn callback(user_data: ?*anyopaque) callconv(.c) void {
-            const session_ptr: *Session = @alignCast(@ptrCast(user_data));
-            session_ptr.connect(struct {
-                fn callback(_: ?*gio.GVariant, err: ?*gio.GError, _: ?*anyopaque) void {
-                    if (err) |_| {
-                        std.debug.print("Error connecting.\n", .{});
-                    }
-                }
-            }.callback, null) catch {
-                std.debug.print("Error connecting.\n", .{});
-            };
-        }
-    }.callback, &session);
+    pub fn deinit(self: *OpenVPNClient) void {
+        self.allocator.free(std.mem.span(self.username));
+        self.allocator.free(std.mem.span(self.password));
+        self.allocator.free(self.totp_secret);
+        self.allocator.free(std.mem.span(self.config_name));
+    }
 
-    gio.g_main_loop_run(main_loop);
-}
+    fn newProxy(self: *OpenVPNClient, name: [*:0]const u8, object_path: [*:0]const u8, interface_name: [*:0]const u8, callback: NewProxyCallback) !void {
+        gio.g_dbus_proxy_new_for_bus(
+            gio.G_BUS_TYPE_SYSTEM,
+            gio.G_DBUS_PROXY_FLAGS_NONE,
+            null,
+            name,
+            object_path,
+            interface_name,
+            null,
+            NewProxyClosure.callback,
+            try NewProxyClosure.init(self, callback, self.allocator),
+        );
+    }
+
+    fn sigIntCallback(user_data: ?*anyopaque) callconv(.c) c_int {
+        const self: *OpenVPNClient = @alignCast(@ptrCast(user_data));
+        gio.g_main_loop_quit(self.main_loop);
+        return gio.G_SOURCE_REMOVE;
+    }
+
+    fn createConfigMgrProxy(_: ?*anyopaque) callconv(.c) void {
+        //const self: *OpenVPNClient = @alignCast(@ptrCast(user_data));
+    }
+
+    pub fn connect(self: *OpenVPNClient) !void {
+        self.main_loop = gio.g_main_loop_new(
+            null,
+            gio.FALSE,
+        ) orelse return error.GError;
+        defer gio.g_main_loop_unref(self.main_loop);
+
+        _ = gio.g_unix_signal_add(
+            std.os.linux.SIG.INT,
+            sigIntCallback,
+            self,
+        );
+
+        // Schedule connect to be called when the main loop is idle
+        _ = gio.g_idle_add_once(createConfigMgrProxy, self);
+
+        gio.g_main_loop_run(self.main_loop);
+    }
+};
