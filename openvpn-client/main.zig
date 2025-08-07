@@ -10,9 +10,9 @@ pub fn main() !void {
     const creds = try credentials.getCredentials(allocator);
     defer creds.deinit();
 
-    try client.connect(allocator, creds.config_name.?, .{
-        .username = creds.username.?,
-        .password = creds.password.?,
-        .totp_secret = creds.totp_secret.?,
+    try client.connect(allocator, creds.config_name, .{
+        .username = creds.username,
+        .password = creds.password,
+        .totp_secret = creds.totp_secret,
     });
 }
