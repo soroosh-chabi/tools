@@ -341,27 +341,47 @@ const DisconnectQuitClosure = struct {
     }
 };
 
-const NewProxyCallback = *const fn (self: *OpenVPNClient, proxy: ?*gio.GDBusProxy) void;
-const NewProxyClosure = struct {
-    client: *OpenVPNClient,
-    result_callback: NewProxyCallback,
+const RetryingAsyncTask = struct {
+    backoff_ms: gio.guint = 100,
+    user_data: ?*anyopaque,
+    start: *const fn (task: *RetryingAsyncTask) anyerror!void,
     allocator: std.mem.Allocator,
 
-    fn init(client: *OpenVPNClient, result_callback: NewProxyCallback, allocator: std.mem.Allocator) !*NewProxyClosure {
-        const closure = try allocator.create(NewProxyClosure);
-        closure.client = client;
-        closure.result_callback = result_callback;
-        closure.allocator = allocator;
-        return closure;
+    fn init(allocator: std.mem.Allocator, start: *const fn (task: *RetryingAsyncTask) anyerror!void, user_data: ?*anyopaque) !*RetryingAsyncTask {
+        const task = try allocator.create(RetryingAsyncTask);
+        task.start = start;
+        task.user_data = user_data;
+        task.allocator = allocator;
+        return task;
     }
 
-    fn callback(_: ?*gio.GObject, res: ?*gio.GAsyncResult, user_data: ?*anyopaque) callconv(.c) void {
-        const self: *NewProxyClosure = @alignCast(@ptrCast(user_data));
-        defer self.allocator.destroy(self);
-        var g_error: ?*gio.GError = null;
-        const proxy = gio.g_dbus_proxy_new_for_bus_finish(res, &g_error);
-        reportGError(g_error) catch {};
-        self.result_callback(self.client, proxy);
+    fn deinit(self: *RetryingAsyncTask) void {
+        self.allocator.destroy(self);
+    }
+
+    fn callback(user_data: ?*anyopaque) callconv(.c) void {
+        const self: *RetryingAsyncTask = @alignCast(@ptrCast(user_data));
+        self.start(self) catch |err| {
+            std.io.getStdOut().writer().print("Error: {}\n", .{err}) catch {};
+            self.scheduleRetry();
+        };
+    }
+
+    fn will_retry(self: *RetryingAsyncTask, g_error: ?*gio.GError) bool {
+        reportGError(g_error) catch {
+            self.scheduleRetry();
+            return true;
+        };
+        return false;
+    }
+
+    fn scheduleRetry(self: *RetryingAsyncTask) void {
+        _ = gio.g_timeout_add_once(
+            self.backoff_ms,
+            callback,
+            self,
+        );
+        self.backoff_ms *= 2;
     }
 };
 
@@ -398,40 +418,28 @@ pub const OpenVPNClient = struct {
         }
     }
 
-    fn newProxy(self: *OpenVPNClient, name: [*:0]const u8, object_path: [*:0]const u8, interface_name: [*:0]const u8, callback: NewProxyCallback) !void {
+    fn createConfigMgrProxy(task: *RetryingAsyncTask) !void {
         gio.g_dbus_proxy_new_for_bus(
             gio.G_BUS_TYPE_SYSTEM,
             gio.G_DBUS_PROXY_FLAGS_NONE,
             null,
-            name,
-            object_path,
-            interface_name,
-            null,
-            NewProxyClosure.callback,
-            try NewProxyClosure.init(self, callback, self.allocator),
-        );
-    }
-
-    fn createConfigMgrProxy(user_data: ?*anyopaque) callconv(.c) void {
-        const self: *OpenVPNClient = @alignCast(@ptrCast(user_data));
-        self.newProxy(
             "net.openvpn.v3.configuration",
             "/net/openvpn/v3/configuration",
             "net.openvpn.v3.configuration",
+            null,
             configMgrProxyCallback,
-        ) catch {
-            std.io.getStdOut().writer().writeAll("Failed to create proxy for configuration manager. Retrying...\n") catch {};
-            _ = gio.g_idle_add_once(createConfigMgrProxy, self);
-        };
+            task,
+        );
     }
 
-    fn configMgrProxyCallback(self: *OpenVPNClient, proxy: ?*gio.GDBusProxy) void {
-        if (proxy) |p| {
-            self.config_mgr_proxy = p;
-        } else {
-            std.io.getStdOut().writer().writeAll("Failed to create proxy for configuration manager. Retrying...\n") catch {};
-            _ = gio.g_idle_add_once(createConfigMgrProxy, self);
-        }
+    fn configMgrProxyCallback(_: ?*gio.GObject, res: ?*gio.GAsyncResult, user_data: ?*anyopaque) callconv(.c) void {
+        var g_error: ?*gio.GError = null;
+        const proxy = gio.g_dbus_proxy_new_for_bus_finish(res, &g_error);
+        const task: *RetryingAsyncTask = @alignCast(@ptrCast(user_data));
+        if (task.will_retry(g_error)) return;
+        defer task.deinit();
+        const self: *OpenVPNClient = @alignCast(@ptrCast(task.user_data));
+        self.config_mgr_proxy = proxy;
     }
 
     pub fn connect(self: *OpenVPNClient) !void {
@@ -447,7 +455,10 @@ pub const OpenVPNClient = struct {
             self,
         );
 
-        _ = gio.g_idle_add_once(createConfigMgrProxy, self);
+        _ = gio.g_idle_add_once(
+            RetryingAsyncTask.callback,
+            try RetryingAsyncTask.init(self.allocator, createConfigMgrProxy, self),
+        );
 
         gio.g_main_loop_run(self.main_loop);
     }
