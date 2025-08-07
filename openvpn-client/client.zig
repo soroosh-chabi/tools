@@ -141,12 +141,39 @@ pub const SessionFactory = struct {
 };
 
 pub const Session = struct {
+    pub const ResultCallback = *const fn (result: ?*gio.GVariant, err: ?*gio.GError, user_data: ?*anyopaque) void;
     session_proxy: *gio.GDBusProxy,
     log_proxy: *gio.GDBusProxy,
     allocator: std.mem.Allocator,
     username: ?[*:0]u8 = null,
     password: ?[*:0]u8 = null,
     totp_secret: ?[]u8 = null,
+
+    const GDBusCallClosure = struct {
+        result_callback: ResultCallback,
+        user_data: ?*anyopaque,
+        allocator: std.mem.Allocator,
+
+        fn init(result_callback: ResultCallback, user_data: ?*anyopaque, allocator: std.mem.Allocator) !*GDBusCallClosure {
+            const closure = try allocator.create(GDBusCallClosure);
+            closure.result_callback = result_callback;
+            closure.user_data = user_data;
+            closure.allocator = allocator;
+            return closure;
+        }
+
+        fn callback(source_object: ?*gio.GObject, res: ?*gio.GAsyncResult, user_data: ?*anyopaque) callconv(.c) void {
+            const self: *GDBusCallClosure = @alignCast(@ptrCast(user_data));
+            defer self.allocator.destroy(self);
+            var g_error: ?*gio.GError = null;
+            const result_variant = gio.g_dbus_proxy_call_finish(@ptrCast(source_object), res, &g_error);
+            defer gio.g_clear_error(&g_error);
+            if (g_error) |_| {} else {
+                defer gio.g_variant_unref(result_variant);
+            }
+            self.result_callback(result_variant, g_error, self.user_data);
+        }
+    };
 
     fn init(allocator: std.mem.Allocator, session_path: [*:0]const u8) !Session {
         var g_error: ?*gio.GError = null;
@@ -271,7 +298,7 @@ pub const Session = struct {
         return @ptrCast(result.stdout);
     }
 
-    pub fn connect(self: Session) void {
+    pub fn connect(self: Session, result_callback: ResultCallback, user_data: ?*anyopaque) !void {
         gio.g_dbus_proxy_call(
             self.session_proxy,
             "Connect",
@@ -279,32 +306,25 @@ pub const Session = struct {
             gio.G_DBUS_CALL_FLAGS_NONE,
             -1,
             null,
-            null,
-            null,
+            GDBusCallClosure.callback,
+            try GDBusCallClosure.init(result_callback, user_data, self.allocator),
         );
     }
 
-    pub fn disconnect(self: Session, cb: *const fn (user_data: ?*anyopaque, result: error{GError}!void) void, user_data: ?*anyopaque) !void {
-        const Closure = struct {
-            closure_cb: *const fn (user_data: ?*anyopaque, err: error{GError}!void) void,
-            closure_user_data: ?*anyopaque,
-            allocator: std.mem.Allocator,
-            fn callback(source_object: ?*gio.GObject, res: ?*gio.GAsyncResult, callback_user_data: ?*anyopaque) callconv(.c) void {
-                const callback_closure: *@This() = @alignCast(@ptrCast(callback_user_data));
-                defer callback_closure.allocator.destroy(callback_closure);
-                var g_error: ?*gio.GError = null;
-                const result_variant = gio.g_dbus_proxy_call_finish(@ptrCast(source_object), res, &g_error);
-                const result = reportGError(g_error);
-                if (result) |_| {
-                    gio.g_variant_unref(result_variant);
-                } else |_| {}
-                callback_closure.closure_cb(callback_closure.closure_user_data, result);
-            }
-        };
-        const closure = try self.allocator.create(Closure);
-        closure.closure_cb = cb;
-        closure.closure_user_data = user_data;
-        closure.allocator = self.allocator;
+    fn ready(self: Session, result_callback: ResultCallback, user_data: ?*anyopaque) void {
+        gio.g_dbus_proxy_call(
+            self.session_proxy,
+            "Ready",
+            null,
+            gio.G_DBUS_CALL_FLAGS_NONE,
+            -1,
+            null,
+            GDBusCallClosure.callback,
+            try GDBusCallClosure.init(result_callback, user_data, self.allocator),
+        );
+    }
+
+    pub fn disconnect(self: Session, result_callback: ResultCallback, user_data: ?*anyopaque) !void {
         gio.g_dbus_proxy_call(
             self.session_proxy,
             "Disconnect",
@@ -312,8 +332,8 @@ pub const Session = struct {
             gio.G_DBUS_CALL_FLAGS_NONE,
             -1,
             null,
-            Closure.callback,
-            closure,
+            GDBusCallClosure.callback,
+            try GDBusCallClosure.init(result_callback, user_data, self.allocator),
         );
     }
 

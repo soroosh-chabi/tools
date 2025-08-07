@@ -27,7 +27,6 @@ pub fn main() !void {
         .password = creds.password.?,
         .totp_secret = creds.totp_secret.?,
     });
-    try session.setInputs();
 
     const SigIntClosure = struct {
         const SigIntClosure = @This();
@@ -36,9 +35,12 @@ pub fn main() !void {
         fn callback(user_data: ?*anyopaque) callconv(.c) c_int {
             const self: *const SigIntClosure = @alignCast(@ptrCast(user_data));
             self.closure_session.disconnect(struct {
-                fn callback(disconnect_user_data: ?*anyopaque, _: error{GError}!void) void {
+                fn callback(_: ?*client.gio.GVariant, err: ?*client.gio.GError, disconnect_user_data: ?*anyopaque) void {
                     const disconnect_self: *const SigIntClosure = @alignCast(@ptrCast(disconnect_user_data));
-                    client.gio.g_main_loop_quit(disconnect_self.closure_main_loop);
+                    defer client.gio.g_main_loop_quit(disconnect_self.closure_main_loop);
+                    if (err) |_| {
+                        std.debug.print("Error disconnecting.\n", .{});
+                    }
                 }
             }.callback, user_data) catch {
                 std.debug.print("Error disconnecting.\n", .{});
@@ -59,7 +61,15 @@ pub fn main() !void {
     _ = client.gio.g_idle_add_once(struct {
         fn callback(user_data: ?*anyopaque) callconv(.c) void {
             const session_ptr: *client.Session = @alignCast(@ptrCast(user_data));
-            session_ptr.connect();
+            session_ptr.connect(struct {
+                fn callback(_: ?*client.gio.GVariant, err: ?*client.gio.GError, _: ?*anyopaque) void {
+                    if (err) |_| {
+                        std.debug.print("Error connecting.\n", .{});
+                    }
+                }
+            }.callback, null) catch {
+                std.debug.print("Error connecting.\n", .{});
+            };
         }
     }.callback, &session);
 
