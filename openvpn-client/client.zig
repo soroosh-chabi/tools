@@ -472,10 +472,6 @@ pub const OpenVPNClient = struct {
         const result = gio.g_dbus_proxy_call_finish(@ptrCast(source_object), res, &g_error);
         if (task.will_retry(g_error)) return;
         defer gio.g_variant_unref(result);
-        gio.g_free(task.client.config_path);
-        task.client.config_path = null;
-        gio.g_object_unref(task.client.session_mgr_proxy);
-        task.client.session_mgr_proxy = null;
         gio.g_variant_get_child(result, 0, "o", &task.client.session_path);
         task.deinit();
     }
