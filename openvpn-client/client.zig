@@ -340,6 +340,7 @@ pub const OpenVPNClient = struct {
     config_path: ?[*:0]u8 = null,
     session_mgr_proxy: ?*gio.GDBusProxy = null,
     session_path: ?[*:0]u8 = null,
+    log_proxy: ?*gio.GDBusProxy = null,
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -473,6 +474,29 @@ pub const OpenVPNClient = struct {
         if (task.will_retry(g_error)) return;
         defer gio.g_variant_unref(result);
         gio.g_variant_get_child(result, 0, "o", &task.client.session_path);
+        task.reuseWith(createLogProxy, createLogProxyReady);
+        RetryingAsyncTask.start_callback(task);
+    }
+
+    fn createLogProxy(task: *RetryingAsyncTask) !void {
+        gio.g_dbus_proxy_new_for_bus(
+            gio.G_BUS_TYPE_SYSTEM,
+            gio.G_DBUS_PROXY_FLAGS_NONE,
+            null,
+            "net.openvpn.v3.log",
+            task.client.session_path.?,
+            "net.openvpn.v3.backends",
+            null,
+            RetryingAsyncTask.ready_callback,
+            task,
+        );
+    }
+
+    fn createLogProxyReady(task: *RetryingAsyncTask, _: ?*gio.GObject, res: ?*gio.GAsyncResult) !void {
+        var g_error: ?*gio.GError = null;
+        const proxy = gio.g_dbus_proxy_new_for_bus_finish(res, &g_error);
+        if (task.will_retry(g_error)) return;
+        task.client.log_proxy = proxy;
         task.deinit();
     }
 
