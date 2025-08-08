@@ -534,14 +534,64 @@ pub const OpenVPNClient = struct {
 };
 
 pub const ConfigMgrClient = struct {
-    const LookupCallback = *const fn (config_path: ?[*:0]u8, g_error: ?*gio.GError, user_data: ?*anyopaque) void;
-    pub const LookupArgs = struct {
+    const max_retries = 3;
+    const default_backoff_ms = 100;
+    pub const LookupCallback = *const fn (config_path: ?[*:0]u8, g_error: ?*gio.GError, user_data: ?*anyopaque) void;
+    const LookupContext = struct {
         config_name: [*:0]const u8,
         callback: LookupCallback,
         user_data: ?*anyopaque,
+        allocator: std.mem.Allocator,
+        backoff_ms: u32,
+        retries: u32,
+        proxy: ?*gio.GDBusProxy = null,
+
+        fn deinit(self: *LookupContext) void {
+            if (self.proxy) |p| {
+                gio.g_object_unref(p);
+            }
+        }
+
+        fn resetRetries(self: *LookupContext) void {
+            self.retries = 0;
+            self.backoff_ms = default_backoff_ms;
+        }
     };
 
-    pub fn lookupConfigPath(args: *LookupArgs) void {
+    fn shouldReturn(ctx: *LookupContext, g_error: ?*gio.GError, retry_callback: fn (user_data: gio.gpointer) callconv(.c) void) bool {
+        if (g_error) |e| {
+            if (ctx.retries < @This().max_retries) {
+                _ = gio.g_timeout_add_once(ctx.backoff_ms, retry_callback, ctx);
+                ctx.retries += 1;
+                ctx.backoff_ms *= 2;
+            } else {
+                ctx.callback(null, e, ctx.user_data);
+                destroy(ctx);
+            }
+            return true;
+        }
+        ctx.resetRetries();
+        return false;
+    }
+
+    fn destroy(ctx: *LookupContext) void {
+        ctx.deinit();
+        ctx.allocator.destroy(ctx);
+    }
+
+    pub fn lookupConfigName(allocator: std.mem.Allocator, config_name: [*:0]const u8, callback: LookupCallback, user_data: ?*anyopaque) !void {
+        const ctx = try allocator.create(LookupContext);
+        ctx.allocator = allocator;
+        ctx.config_name = config_name;
+        ctx.callback = callback;
+        ctx.user_data = user_data;
+        ctx.backoff_ms = default_backoff_ms;
+        ctx.retries = 0;
+        createProxy(ctx);
+    }
+
+    fn createProxy(user_data: gio.gpointer) callconv(.c) void {
+        const ctx: *LookupContext = @alignCast(@ptrCast(user_data));
         gio.g_dbus_proxy_new_for_bus(
             gio.G_BUS_TYPE_SYSTEM,
             gio.G_DBUS_PROXY_FLAGS_NONE,
@@ -551,7 +601,7 @@ pub const ConfigMgrClient = struct {
             "net.openvpn.v3.configuration",
             null,
             proxyReady,
-            args,
+            ctx,
         );
     }
 
@@ -560,56 +610,59 @@ pub const ConfigMgrClient = struct {
         res: ?*gio.GAsyncResult,
         user_data: gio.gpointer,
     ) callconv(.c) void {
-        const args: *LookupArgs = @alignCast(@ptrCast(user_data));
+        const ctx: *LookupContext = @alignCast(@ptrCast(user_data));
         var g_error: ?*gio.GError = null;
         const proxy = gio.g_dbus_proxy_new_for_bus_finish(res, &g_error);
-        if (g_error) |e| {
-            args.callback(null, e, args.user_data);
-        } else {
-            gio.g_dbus_proxy_call(
-                proxy,
-                "LookupConfigName",
-                gio.g_variant_new("(s)", args.config_name),
-                gio.G_DBUS_CALL_FLAGS_NONE,
-                -1,
-                null,
-                lookupConfigPathReady,
-                args,
-            );
+        if (shouldReturn(ctx, g_error, createProxy)) {
+            return;
         }
+        ctx.proxy = proxy;
+        callLookupConfigName(ctx);
     }
 
-    fn lookupConfigPathReady(
+    fn callLookupConfigName(user_data: gio.gpointer) callconv(.c) void {
+        const ctx: *LookupContext = @alignCast(@ptrCast(user_data));
+        gio.g_dbus_proxy_call(
+            ctx.proxy,
+            "LookupConfigName",
+            gio.g_variant_new("(s)", ctx.config_name),
+            gio.G_DBUS_CALL_FLAGS_NONE,
+            -1,
+            null,
+            callLookupConfigNameReady,
+            ctx,
+        );
+    }
+
+    fn callLookupConfigNameReady(
         source_object: ?*gio.GObject,
         res: ?*gio.GAsyncResult,
         user_data: gio.gpointer,
     ) callconv(.c) void {
-        const args: *const LookupArgs = @alignCast(@ptrCast(user_data));
+        const ctx: *LookupContext = @alignCast(@ptrCast(user_data));
         var g_error: ?*gio.GError = null;
         const result = gio.g_dbus_proxy_call_finish(@ptrCast(source_object), res, &g_error);
-        if (g_error) |e| {
-            args.callback(null, e, args.user_data);
-        } else {
-            defer gio.g_variant_unref(result);
-            const expected_type = gio.g_variant_type_new("(ao)");
-            defer gio.g_variant_type_free(expected_type);
-            if (gio.g_variant_is_of_type(result, expected_type) == gio.FALSE) {
-                args.callback(null, gio.g_error_new_literal(
-                    gio.g_io_error_quark(),
-                    gio.G_IO_ERROR_FAILED,
-                    "Invalid response from configuration manager",
-                ), args.user_data);
-                return;
-            }
-            const config_paths = gio.g_variant_get_child_value(result, 0);
-            defer gio.g_variant_unref(config_paths);
-            if (gio.g_variant_n_children(config_paths) == 0) {
-                args.callback(null, null, args.user_data);
-            } else {
-                const config_path: [*:0]u8 = undefined;
-                gio.g_variant_get_child(config_paths, 0, "o", &config_path);
-                args.callback(config_path, null, args.user_data);
-            }
+        if (shouldReturn(ctx, g_error, callLookupConfigName)) {
+            return;
         }
+        defer gio.g_variant_unref(result);
+        const expected_type = gio.g_variant_type_new("(ao)");
+        defer gio.g_variant_type_free(expected_type);
+        if (gio.g_variant_is_of_type(result, expected_type) == gio.FALSE) {
+            _ = shouldReturn(ctx, gio.g_error_new_literal(
+                gio.g_io_error_quark(),
+                gio.G_IO_ERROR_FAILED,
+                "Invalid response from configuration manager",
+            ), callLookupConfigName);
+            return;
+        }
+        defer destroy(ctx);
+        const config_paths = gio.g_variant_get_child_value(result, 0);
+        defer gio.g_variant_unref(config_paths);
+        var config_path: ?[*:0]u8 = null;
+        if (gio.g_variant_n_children(config_paths) > 0) {
+            gio.g_variant_get_child(config_paths, 0, "o", &config_path);
+        }
+        ctx.callback(config_path, null, ctx.user_data);
     }
 };

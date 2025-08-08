@@ -22,18 +22,15 @@ pub fn main() !void {
 }
 
 fn asyncMain(_: gio.gpointer) callconv(.c) void {
-    const args = allocator.create(client.ConfigMgrClient.LookupArgs) catch {
-        return;
-    };
-    args.config_name = "daricheh";
-    args.callback = lookupConfigPathReady;
-    args.user_data = args;
-    client.ConfigMgrClient.lookupConfigPath(args);
+    client.ConfigMgrClient.lookupConfigName(
+        allocator,
+        "daricheh",
+        lookupConfigNameReady,
+        null,
+    ) catch {};
 }
 
-fn lookupConfigPathReady(config_path: ?[*:0]u8, g_error: ?*gio.GError, user_data: ?*anyopaque) void {
-    const args: *client.ConfigMgrClient.LookupArgs = @alignCast(@ptrCast(user_data));
-    defer allocator.destroy(args);
+fn lookupConfigNameReady(config_path: ?[*:0]u8, g_error: ?*gio.GError, _: ?*anyopaque) void {
     defer gio.g_main_loop_quit(main_loop);
     if (g_error) |e| {
         defer gio.g_error_free(e);
