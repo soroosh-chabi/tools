@@ -89,34 +89,6 @@ pub const Session = struct {
         }
     };
 
-    fn init(allocator: std.mem.Allocator, session_path: [*:0]const u8) !Session {
-        var g_error: ?*gio.GError = null;
-        const session_proxy = gio.g_dbus_proxy_new_for_bus_sync(
-            gio.G_BUS_TYPE_SYSTEM,
-            gio.G_DBUS_PROXY_FLAGS_NONE,
-            null,
-            "net.openvpn.v3.sessions",
-            session_path,
-            "net.openvpn.v3.sessions",
-            null,
-            &g_error,
-        );
-        try reportGError(g_error);
-        _ = try callWithRetry(
-            session_proxy,
-            "LogForward",
-            gio.g_variant_new("(b)", gio.TRUE),
-        );
-        return .{
-            .session_proxy = session_proxy,
-            .allocator = allocator,
-        };
-    }
-
-    pub fn deinit(self: Session) void {
-        gio.g_object_unref(self.session_proxy);
-    }
-
     fn generateTotp(self: Session) ![*:0]u8 {
         // Build oathtool command
         const argv = [_][]const u8{
@@ -205,7 +177,7 @@ pub const Session = struct {
 
 const RetryingAsyncTask = struct {
     const default_backoff_ms = 100;
-    backoff_ms: gio.guint = default_backoff_ms,
+    backoff_ms: gio.guint,
     client: *OpenVPNClient,
     start: *const fn (task: *RetryingAsyncTask) anyerror!void,
     ready: *const fn (task: *RetryingAsyncTask, source_object: ?*gio.GObject, res: ?*gio.GAsyncResult) anyerror!void,
@@ -222,6 +194,7 @@ const RetryingAsyncTask = struct {
         self.ready = ready;
         self.client = client;
         self.allocator = allocator;
+        self.backoff_ms = default_backoff_ms;
         return self;
     }
 
@@ -289,6 +262,7 @@ pub const OpenVPNClient = struct {
     session_mgr_proxy: ?*gio.GDBusProxy = null,
     session_path: ?[*:0]u8 = null,
     log_proxy: ?*gio.GDBusProxy = null,
+    session_proxy: ?*gio.GDBusProxy = null,
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -322,6 +296,9 @@ pub const OpenVPNClient = struct {
             gio.free(p);
         }
         if (self.log_proxy) |p| {
+            gio.g_object_unref(p);
+        }
+        if (self.session_proxy) |p| {
             gio.g_object_unref(p);
         }
     }
@@ -453,8 +430,68 @@ pub const OpenVPNClient = struct {
         if (task.will_retry(g_error)) return;
         defer gio.g_variant_unref(result);
         gio.g_variant_get_child(result, 0, "o", &task.client.session_path);
+
         task.reuseWith(createLogProxy, createLogProxyReady);
+        _ = gio.g_idle_add_once(
+            RetryingAsyncTask.start_callback,
+            task,
+        );
+
+        const forward_log_task = RetryingAsyncTask.init(
+            task.client.allocator,
+            createSessionProxy,
+            createSessionProxyReady,
+            task.client,
+        );
+        _ = gio.g_idle_add_once(
+            RetryingAsyncTask.start_callback,
+            forward_log_task,
+        );
+    }
+
+    fn createSessionProxy(task: *RetryingAsyncTask) !void {
+        gio.g_dbus_proxy_new_for_bus(
+            gio.G_BUS_TYPE_SYSTEM,
+            gio.G_DBUS_PROXY_FLAGS_NONE,
+            null,
+            "net.openvpn.v3.sessions",
+            task.client.session_path.?,
+            "net.openvpn.v3.sessions",
+            null,
+            RetryingAsyncTask.ready_callback,
+            task,
+        );
+    }
+
+    fn createSessionProxyReady(task: *RetryingAsyncTask, _: ?*gio.GObject, res: ?*gio.GAsyncResult) !void {
+        var g_error: ?*gio.GError = null;
+        const proxy = gio.g_dbus_proxy_new_for_bus_finish(res, &g_error);
+        if (task.will_retry(g_error)) return;
+        task.client.session_proxy = proxy;
+        task.reuseWith(forwardLog, forwardLogReady);
         RetryingAsyncTask.start_callback(task);
+    }
+
+    fn forwardLog(task: *RetryingAsyncTask) !void {
+        gio.g_dbus_proxy_call(
+            task.client.session_proxy,
+            "LogForward",
+            gio.g_variant_new("(b)", gio.TRUE),
+            gio.G_DBUS_CALL_FLAGS_NONE,
+            -1,
+            null,
+            RetryingAsyncTask.ready_callback,
+            task,
+        );
+    }
+
+    fn forwardLogReady(task: *RetryingAsyncTask, source_object: ?*gio.GObject, res: ?*gio.GAsyncResult) !void {
+        var g_error: ?*gio.GError = null;
+        const result = gio.g_dbus_proxy_call_finish(@ptrCast(source_object), res, &g_error);
+        if (task.will_retry(g_error)) return;
+        defer gio.g_variant_unref(result);
+        task.deinit();
+        std.debug.print("log forwarded\n", .{});
     }
 
     fn createLogProxy(task: *RetryingAsyncTask) !void {
@@ -487,6 +524,7 @@ pub const OpenVPNClient = struct {
             return error.GError;
         }
         task.client.log_proxy = proxy;
+        std.debug.print("listening to log proxy status changes\n", .{});
         task.deinit();
     }
 
