@@ -255,27 +255,6 @@ pub const Session = struct {
     }
 };
 
-const DisconnectQuitClosure = struct {
-    main_loop: *gio.GMainLoop,
-    allocator: std.mem.Allocator,
-
-    fn init(allocator: std.mem.Allocator, main_loop: *gio.GMainLoop) !*DisconnectQuitClosure {
-        const closure = try allocator.create(DisconnectQuitClosure);
-        closure.main_loop = main_loop;
-        closure.allocator = allocator;
-        return closure;
-    }
-
-    fn callback(_: ?*gio.GVariant, err: ?*gio.GError, user_data: ?*anyopaque) void {
-        const self: *DisconnectQuitClosure = @alignCast(@ptrCast(user_data));
-        defer self.allocator.destroy(self);
-        defer gio.g_main_loop_quit(self.main_loop);
-        if (err) |_| {
-            std.debug.print("Error disconnecting.\n", .{});
-        }
-    }
-};
-
 const RetryingAsyncTask = struct {
     const default_backoff_ms = 100;
     backoff_ms: gio.guint = default_backoff_ms,
