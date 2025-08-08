@@ -377,7 +377,7 @@ pub const OpenVPNClient = struct {
         const config_paths = gio.g_variant_get_child_value(result, 0);
         defer gio.g_variant_unref(config_paths);
         gio.g_variant_get_child(config_paths, 0, "o", &task.client.config_path);
-        createSessionOrFinishTask(task);
+        task.reuseWith(createSessionMgrProxy, createSessionMgrProxyReady);
     }
 
     fn createSessionMgrProxy(task: *RetryingAsyncTask) !void {
@@ -399,14 +399,6 @@ pub const OpenVPNClient = struct {
         const proxy = gio.g_dbus_proxy_new_for_bus_finish(res, &g_error);
         if (task.will_retry(g_error)) return;
         task.client.session_mgr_proxy = proxy;
-        createSessionOrFinishTask(task);
-    }
-
-    fn createSessionOrFinishTask(task: *RetryingAsyncTask) void {
-        if (task.client.session_mgr_proxy == null or task.client.config_path == null) {
-            task.deinit();
-            return;
-        }
         task.reuseWith(createSession, createSessionReady);
         RetryingAsyncTask.start_callback(task);
     }
@@ -430,23 +422,8 @@ pub const OpenVPNClient = struct {
         if (task.will_retry(g_error)) return;
         defer gio.g_variant_unref(result);
         gio.g_variant_get_child(result, 0, "o", &task.client.session_path);
-
-        task.reuseWith(createLogProxy, createLogProxyReady);
-        _ = gio.g_idle_add_once(
-            RetryingAsyncTask.start_callback,
-            task,
-        );
-
-        const forward_log_task = RetryingAsyncTask.init(
-            task.client.allocator,
-            createSessionProxy,
-            createSessionProxyReady,
-            task.client,
-        );
-        _ = gio.g_idle_add_once(
-            RetryingAsyncTask.start_callback,
-            forward_log_task,
-        );
+        task.reuseWith(createSessionProxy, createSessionProxyReady);
+        RetryingAsyncTask.start_callback(task);
     }
 
     fn createSessionProxy(task: *RetryingAsyncTask) !void {
@@ -490,8 +467,7 @@ pub const OpenVPNClient = struct {
         const result = gio.g_dbus_proxy_call_finish(@ptrCast(source_object), res, &g_error);
         if (task.will_retry(g_error)) return;
         defer gio.g_variant_unref(result);
-        task.deinit();
-        std.debug.print("log forwarded\n", .{});
+        task.reuseWith(createLogProxy, createLogProxyReady);
     }
 
     fn createLogProxy(task: *RetryingAsyncTask) !void {
@@ -524,7 +500,6 @@ pub const OpenVPNClient = struct {
             return error.GError;
         }
         task.client.log_proxy = proxy;
-        std.debug.print("listening to log proxy status changes\n", .{});
         task.deinit();
     }
 
@@ -544,11 +519,6 @@ pub const OpenVPNClient = struct {
         _ = gio.g_idle_add_once(
             RetryingAsyncTask.start_callback,
             RetryingAsyncTask.init(self.allocator, createConfigMgrProxy, createConfigMgrProxyReady, self),
-        );
-
-        _ = gio.g_idle_add_once(
-            RetryingAsyncTask.start_callback,
-            RetryingAsyncTask.init(self.allocator, createSessionMgrProxy, createSessionMgrProxyReady, self),
         );
 
         gio.g_main_loop_run(self.main_loop);
