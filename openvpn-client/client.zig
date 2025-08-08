@@ -60,7 +60,6 @@ fn callWithRetry(
 
 pub const Session = struct {
     session_proxy: *gio.GDBusProxy,
-    log_proxy: *gio.GDBusProxy,
     allocator: std.mem.Allocator,
 
     pub const ResultCallback = *const fn (result: ?*gio.GVariant, err: ?*gio.GError, user_data: ?*anyopaque) void;
@@ -108,65 +107,14 @@ pub const Session = struct {
             "LogForward",
             gio.g_variant_new("(b)", gio.TRUE),
         );
-        const log_proxy = gio.g_dbus_proxy_new_for_bus_sync(
-            gio.G_BUS_TYPE_SYSTEM,
-            gio.G_DBUS_PROXY_FLAGS_NONE,
-            null,
-            "net.openvpn.v3.log",
-            session_path,
-            "net.openvpn.v3.backends",
-            null,
-            &g_error,
-        );
-        try reportGError(g_error);
-        if (gio.g_signal_connect_data(
-            log_proxy,
-            "g-signal::StatusChange",
-            gio.G_CALLBACK(handleStatusChange),
-            null,
-            null,
-            gio.G_CONNECT_DEFAULT,
-        ) <= 0) {
-            return error.GError;
-        }
         return .{
             .session_proxy = session_proxy,
-            .log_proxy = log_proxy,
             .allocator = allocator,
         };
     }
 
     pub fn deinit(self: Session) void {
         gio.g_object_unref(self.session_proxy);
-        gio.g_object_unref(self.log_proxy);
-    }
-
-    fn handleStatusChange(
-        _: ?*gio.GDBusProxy,
-        _: [*:0]u8,
-        _: [*:0]u8,
-        parameters: ?*gio.GVariant,
-        _: ?*anyopaque,
-    ) callconv(.c) void {
-        var code_major: u32 = undefined;
-        var code_minor: u32 = undefined;
-        var message: [*:0]u8 = undefined;
-        gio.g_variant_get(parameters, "(uus)", &code_major, &code_minor, &message);
-        defer gio.g_free(message);
-        const stdOut = std.io.getStdOut().writer();
-        if (code_major == 2) {
-            switch (code_minor) {
-                2, 16 => return,
-                6 => stdOut.writeAll("Connecting...\n") catch {},
-                7 => stdOut.writeAll("Connected.\n") catch {},
-                8 => stdOut.writeAll("Disconnecting...\n") catch {},
-                9 => stdOut.writeAll("Disconnected.\n") catch {},
-                11 => stdOut.writeAll("Authentication failed. Disconnecting...\n") catch {},
-                else => stdOut.print("Status change: {d}.{d}: {s}\n", .{ code_major, code_minor, message }) catch {},
-            }
-        } else {
-            stdOut.print("Status change: {d}.{d}: {s}\n", .{ code_major, code_minor, message }) catch {};
-        }
     }
 
     fn generateTotp(self: Session) ![*:0]u8 {
@@ -373,6 +321,37 @@ pub const OpenVPNClient = struct {
         if (self.session_path) |p| {
             gio.free(p);
         }
+        if (self.log_proxy) |p| {
+            gio.g_object_unref(p);
+        }
+    }
+
+    fn handleStatusChange(
+        _: ?*gio.GDBusProxy,
+        _: [*:0]u8,
+        _: [*:0]u8,
+        parameters: ?*gio.GVariant,
+        _: ?*anyopaque,
+    ) callconv(.c) void {
+        var code_major: u32 = undefined;
+        var code_minor: u32 = undefined;
+        var message: [*:0]u8 = undefined;
+        gio.g_variant_get(parameters, "(uus)", &code_major, &code_minor, &message);
+        defer gio.g_free(message);
+        const stdOut = std.io.getStdOut().writer();
+        if (code_major == 2) {
+            switch (code_minor) {
+                2, 16 => return,
+                6 => stdOut.writeAll("Connecting...\n") catch {},
+                7 => stdOut.writeAll("Connected.\n") catch {},
+                8 => stdOut.writeAll("Disconnecting...\n") catch {},
+                9 => stdOut.writeAll("Disconnected.\n") catch {},
+                11 => stdOut.writeAll("Authentication failed. Disconnecting...\n") catch {},
+                else => stdOut.print("Status change: {d}.{d}: {s}\n", .{ code_major, code_minor, message }) catch {},
+            }
+        } else {
+            stdOut.print("Status change: {d}.{d}: {s}\n", .{ code_major, code_minor, message }) catch {};
+        }
     }
 
     fn createConfigMgrProxy(task: *RetryingAsyncTask) !void {
@@ -495,7 +474,18 @@ pub const OpenVPNClient = struct {
     fn createLogProxyReady(task: *RetryingAsyncTask, _: ?*gio.GObject, res: ?*gio.GAsyncResult) !void {
         var g_error: ?*gio.GError = null;
         const proxy = gio.g_dbus_proxy_new_for_bus_finish(res, &g_error);
+        errdefer gio.g_object_unref(proxy);
         if (task.will_retry(g_error)) return;
+        if (gio.g_signal_connect_data(
+            proxy,
+            "g-signal::StatusChange",
+            gio.G_CALLBACK(handleStatusChange),
+            null,
+            null,
+            gio.G_CONNECT_DEFAULT,
+        ) <= 0) {
+            return error.GError;
+        }
         task.client.log_proxy = proxy;
         task.deinit();
     }
