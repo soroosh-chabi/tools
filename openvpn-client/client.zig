@@ -182,6 +182,7 @@ const RetryingAsyncTask = struct {
     start: *const fn (task: *RetryingAsyncTask) anyerror!void,
     ready: *const fn (task: *RetryingAsyncTask, source_object: ?*gio.GObject, res: ?*gio.GAsyncResult) anyerror!void,
     allocator: std.mem.Allocator,
+    cancellable: *gio.GCancellable,
 
     fn init(
         allocator: std.mem.Allocator,
@@ -195,10 +196,12 @@ const RetryingAsyncTask = struct {
         self.client = client;
         self.allocator = allocator;
         self.backoff_ms = default_backoff_ms;
+        self.cancellable = gio.g_cancellable_new();
         return self;
     }
 
     fn deinit(self: *RetryingAsyncTask) void {
+        gio.g_object_unref(self.cancellable);
         self.allocator.destroy(self);
     }
 
@@ -339,7 +342,7 @@ pub const OpenVPNClient = struct {
             "net.openvpn.v3.configuration",
             "/net/openvpn/v3/configuration",
             "net.openvpn.v3.configuration",
-            null,
+            task.cancellable,
             RetryingAsyncTask.ready_callback,
             task,
         );
@@ -361,7 +364,7 @@ pub const OpenVPNClient = struct {
             gio.g_variant_new("(s)", task.client.config_name),
             gio.G_DBUS_CALL_FLAGS_NONE,
             -1,
-            null,
+            task.cancellable,
             RetryingAsyncTask.ready_callback,
             task,
         );
@@ -378,6 +381,7 @@ pub const OpenVPNClient = struct {
         defer gio.g_variant_unref(config_paths);
         gio.g_variant_get_child(config_paths, 0, "o", &task.client.config_path);
         task.reuseWith(createSessionMgrProxy, createSessionMgrProxyReady);
+        RetryingAsyncTask.start_callback(task);
     }
 
     fn createSessionMgrProxy(task: *RetryingAsyncTask) !void {
@@ -388,7 +392,7 @@ pub const OpenVPNClient = struct {
             "net.openvpn.v3.sessions",
             "/net/openvpn/v3/sessions",
             "net.openvpn.v3.sessions",
-            null,
+            task.cancellable,
             RetryingAsyncTask.ready_callback,
             task,
         );
@@ -410,7 +414,7 @@ pub const OpenVPNClient = struct {
             gio.g_variant_new("(o)", task.client.config_path.?),
             gio.G_DBUS_CALL_FLAGS_NONE,
             -1,
-            null,
+            task.cancellable,
             RetryingAsyncTask.ready_callback,
             task,
         );
@@ -434,7 +438,7 @@ pub const OpenVPNClient = struct {
             "net.openvpn.v3.sessions",
             task.client.session_path.?,
             "net.openvpn.v3.sessions",
-            null,
+            task.cancellable,
             RetryingAsyncTask.ready_callback,
             task,
         );
@@ -456,7 +460,7 @@ pub const OpenVPNClient = struct {
             gio.g_variant_new("(b)", gio.TRUE),
             gio.G_DBUS_CALL_FLAGS_NONE,
             -1,
-            null,
+            task.cancellable,
             RetryingAsyncTask.ready_callback,
             task,
         );
@@ -468,6 +472,7 @@ pub const OpenVPNClient = struct {
         if (task.will_retry(g_error)) return;
         defer gio.g_variant_unref(result);
         task.reuseWith(createLogProxy, createLogProxyReady);
+        RetryingAsyncTask.start_callback(task);
     }
 
     fn createLogProxy(task: *RetryingAsyncTask) !void {
@@ -478,7 +483,7 @@ pub const OpenVPNClient = struct {
             "net.openvpn.v3.log",
             task.client.session_path.?,
             "net.openvpn.v3.backends",
-            null,
+            task.cancellable,
             RetryingAsyncTask.ready_callback,
             task,
         );
