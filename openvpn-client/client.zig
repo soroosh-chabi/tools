@@ -105,48 +105,43 @@ const RetryingAsyncTask = struct {
     }
 };
 
+fn handleStatusChange(
+    _: ?*gio.GDBusProxy,
+    _: [*:0]u8,
+    _: [*:0]u8,
+    parameters: ?*gio.GVariant,
+    _: ?*anyopaque,
+) callconv(.c) void {
+    var code_major: u32 = undefined;
+    var code_minor: u32 = undefined;
+    var message: [*:0]u8 = undefined;
+    gio.g_variant_get(parameters, "(uus)", &code_major, &code_minor, &message);
+    defer gio.g_free(message);
+    const stdOut = std.io.getStdOut().writer();
+    if (code_major == 2) {
+        switch (code_minor) {
+            2, 16 => return,
+            6 => stdOut.writeAll("Connecting...\n") catch {},
+            7 => stdOut.writeAll("Connected.\n") catch {},
+            8 => stdOut.writeAll("Disconnecting...\n") catch {},
+            9 => stdOut.writeAll("Disconnected.\n") catch {},
+            11 => stdOut.writeAll("Authentication failed. Disconnecting...\n") catch {},
+            else => stdOut.print("Status change: {d}.{d}: {s}\n", .{ code_major, code_minor, message }) catch {},
+        }
+    } else {
+        stdOut.print("Status change: {d}.{d}: {s}\n", .{ code_major, code_minor, message }) catch {};
+    }
+}
+
 pub const OpenVPNClient = struct {
     allocator: std.mem.Allocator,
-    username: [*:0]u8,
-    password: [*:0]u8,
-    totp_secret: []u8,
     config_name: [*:0]const u8,
-    main_loop: ?*gio.GMainLoop = null,
     config_path: ?[*:0]u8 = null,
     session_mgr_proxy: ?*gio.GDBusProxy = null,
     session_path: ?[*:0]u8 = null,
     log_proxy: ?*gio.GDBusProxy = null,
     session_proxy: ?*gio.GDBusProxy = null,
     connection_cancellable: *gio.GCancellable,
-    disconnecting: bool = false,
-
-    fn handleStatusChange(
-        _: ?*gio.GDBusProxy,
-        _: [*:0]u8,
-        _: [*:0]u8,
-        parameters: ?*gio.GVariant,
-        _: ?*anyopaque,
-    ) callconv(.c) void {
-        var code_major: u32 = undefined;
-        var code_minor: u32 = undefined;
-        var message: [*:0]u8 = undefined;
-        gio.g_variant_get(parameters, "(uus)", &code_major, &code_minor, &message);
-        defer gio.g_free(message);
-        const stdOut = std.io.getStdOut().writer();
-        if (code_major == 2) {
-            switch (code_minor) {
-                2, 16 => return,
-                6 => stdOut.writeAll("Connecting...\n") catch {},
-                7 => stdOut.writeAll("Connected.\n") catch {},
-                8 => stdOut.writeAll("Disconnecting...\n") catch {},
-                9 => stdOut.writeAll("Disconnected.\n") catch {},
-                11 => stdOut.writeAll("Authentication failed. Disconnecting...\n") catch {},
-                else => stdOut.print("Status change: {d}.{d}: {s}\n", .{ code_major, code_minor, message }) catch {},
-            }
-        } else {
-            stdOut.print("Status change: {d}.{d}: {s}\n", .{ code_major, code_minor, message }) catch {};
-        }
-    }
 
     fn createSessionMgrProxy(task: *RetryingAsyncTask) !void {
         gio.g_dbus_proxy_new_for_bus(
@@ -160,15 +155,6 @@ pub const OpenVPNClient = struct {
             RetryingAsyncTask.ready_callback,
             task,
         );
-    }
-
-    fn createSessionMgrProxyReady(task: *RetryingAsyncTask, _: ?*gio.GObject, res: ?*gio.GAsyncResult) !void {
-        var g_error: ?*gio.GError = null;
-        const proxy = gio.g_dbus_proxy_new_for_bus_finish(res, &g_error);
-        if (task.should_return(g_error)) return;
-        task.client.session_mgr_proxy = proxy;
-        task.reuseWith(createSession, createSessionReady);
-        RetryingAsyncTask.start_callback(task);
     }
 
     fn createSession(task: *RetryingAsyncTask) !void {
@@ -191,21 +177,9 @@ pub const OpenVPNClient = struct {
         if (task.should_return(g_error)) return;
         defer gio.g_variant_unref(result);
         gio.g_variant_get_child(result, 0, "o", &task.client.session_path);
-        task.reuseWith(createSessionProxy, createSessionProxyReady);
-        std.debug.print("session created\n", .{});
-        _ = gio.g_timeout_add_once(5000, RetryingAsyncTask.start_callback, task);
     }
 
     fn createSessionProxy(task: *RetryingAsyncTask) !void {
-        var cancellable: ?*gio.GCancellable = task.client.connection_cancellable;
-        if (task.client.disconnecting) {
-            if (task.client.session_path == null) {
-                task.scheduleRetry();
-                return;
-            } else {
-                cancellable = null;
-            }
-        }
         gio.g_dbus_proxy_new_for_bus(
             gio.G_BUS_TYPE_SYSTEM,
             gio.G_DBUS_PROXY_FLAGS_NONE,
@@ -213,23 +187,10 @@ pub const OpenVPNClient = struct {
             "net.openvpn.v3.sessions",
             task.client.session_path.?,
             "net.openvpn.v3.sessions",
-            cancellable,
+            null,
             RetryingAsyncTask.ready_callback,
             task,
         );
-    }
-
-    fn createSessionProxyReady(task: *RetryingAsyncTask, _: ?*gio.GObject, res: ?*gio.GAsyncResult) !void {
-        var g_error: ?*gio.GError = null;
-        const proxy = gio.g_dbus_proxy_new_for_bus_finish(res, &g_error);
-        if (task.should_return(g_error)) {
-            std.debug.print("session proxy creation failed\n", .{});
-            return;
-        }
-        task.client.session_proxy = proxy;
-        std.debug.print("session proxy created\n", .{});
-        task.reuseWith(forwardLog, forwardLogReady);
-        RetryingAsyncTask.start_callback(task);
     }
 
     fn forwardLog(task: *RetryingAsyncTask) !void {
@@ -243,15 +204,6 @@ pub const OpenVPNClient = struct {
             RetryingAsyncTask.ready_callback,
             task,
         );
-    }
-
-    fn forwardLogReady(task: *RetryingAsyncTask, source_object: ?*gio.GObject, res: ?*gio.GAsyncResult) !void {
-        var g_error: ?*gio.GError = null;
-        const result = gio.g_dbus_proxy_call_finish(@ptrCast(source_object), res, &g_error);
-        if (task.should_return(g_error)) return;
-        defer gio.g_variant_unref(result);
-        task.reuseWith(createLogProxy, createLogProxyReady);
-        RetryingAsyncTask.start_callback(task);
     }
 
     fn createLogProxy(task: *RetryingAsyncTask) !void {
