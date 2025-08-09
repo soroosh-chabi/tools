@@ -1,150 +1,31 @@
 const std = @import("std");
 const gio = @import("clibs.zig").gio;
 
-const max_retries = 3;
-
-fn callWithRetry(
-    proxy: *gio.GDBusProxy,
-    method_name: [*:0]const u8,
-    params: ?*gio.GVariant,
-) !*gio.GVariant {
-    if (params) |p| {
-        _ = gio.g_variant_ref_sink(p);
-    }
-    defer {
-        if (params) |p| {
-            gio.g_variant_unref(p);
-        }
-    }
-    var g_error: ?*gio.GError = null;
-    var backoff: u32 = 100;
-    var retries: u32 = 0;
-    while (true) {
-        const result = gio.g_dbus_proxy_call_sync(
-            proxy,
-            method_name,
-            params,
-            gio.G_DBUS_CALL_FLAGS_NONE,
-            -1,
-            null,
-            &g_error,
-        );
-        if (g_error) |e| {
-            if (e.domain == gio.g_dbus_error_quark() and e.code == gio.G_DBUS_ERROR_UNKNOWN_METHOD and retries < max_retries) {
-                gio.g_clear_error(&g_error);
-                std.time.sleep(std.time.ns_per_ms * backoff);
-                backoff *= 2;
-                retries += 1;
-                continue;
-            }
-        }
-        return result.?;
-    }
-}
-
-pub const Session = struct {
-    session_proxy: *gio.GDBusProxy,
-    allocator: std.mem.Allocator,
-
-    pub const ResultCallback = *const fn (result: ?*gio.GVariant, err: ?*gio.GError, user_data: ?*anyopaque) void;
-    const GDBusCallClosure = struct {
-        result_callback: ResultCallback,
-        user_data: ?*anyopaque,
-        allocator: std.mem.Allocator,
-
-        fn init(result_callback: ResultCallback, user_data: ?*anyopaque, allocator: std.mem.Allocator) !*GDBusCallClosure {
-            const closure = try allocator.create(GDBusCallClosure);
-            closure.result_callback = result_callback;
-            closure.user_data = user_data;
-            closure.allocator = allocator;
-            return closure;
-        }
-
-        fn callback(source_object: ?*gio.GObject, res: ?*gio.GAsyncResult, user_data: ?*anyopaque) callconv(.c) void {
-            const self: *GDBusCallClosure = @alignCast(@ptrCast(user_data));
-            defer self.allocator.destroy(self);
-            var g_error: ?*gio.GError = null;
-            const result_variant = gio.g_dbus_proxy_call_finish(@ptrCast(source_object), res, &g_error);
-            defer gio.g_clear_error(&g_error);
-            if (g_error) |_| {} else {
-                defer gio.g_variant_unref(result_variant);
-            }
-            self.result_callback(result_variant, g_error, self.user_data);
-        }
+fn generateTotp(allocator: std.mem.Allocator, totp_secret: []const u8) ![*:0]u8 {
+    // Build oathtool command
+    const argv = [_][]const u8{
+        "oathtool",
+        "--totp",
+        "-d6",
+        "-b",
+        totp_secret,
     };
 
-    fn generateTotp(self: Session) ![*:0]u8 {
-        // Build oathtool command
-        const argv = [_][]const u8{
-            "oathtool",
-            "--totp",
-            "-d6",
-            "-b",
-            self.totp_secret.?,
-        };
-
-        // Execute oathtool and capture output
-        const result = try std.process.Child.run(.{
-            .allocator = self.allocator,
-            .argv = &argv,
-        });
-        defer self.allocator.free(result.stderr);
-        errdefer self.allocator.free(result.stdout);
-        if (result.stderr.len > 0) {
-            try std.io.getStdOut().writer().print("Generating TOTP failed: {s}\n", .{result.stderr});
-            return error.TOTPError;
-        }
-        // Convert output to null-terminated string, trimming newline
-        result.stdout[result.stdout.len - 1] = 0;
-        return @ptrCast(result.stdout);
+    // Execute oathtool and capture output
+    const result = try std.process.Child.run(.{
+        .allocator = allocator,
+        .argv = &argv,
+    });
+    defer allocator.free(result.stderr);
+    errdefer allocator.free(result.stdout);
+    if (result.stderr.len > 0) {
+        try std.io.getStdOut().writer().print("Generating TOTP failed: {s}\n", .{result.stderr});
+        return error.TOTPError;
     }
-
-    pub fn connect(self: Session, result_callback: ResultCallback, user_data: ?*anyopaque) !void {
-        gio.g_dbus_proxy_call(
-            self.session_proxy,
-            "Connect",
-            null,
-            gio.G_DBUS_CALL_FLAGS_NONE,
-            -1,
-            null,
-            GDBusCallClosure.callback,
-            try GDBusCallClosure.init(result_callback, user_data, self.allocator),
-        );
-    }
-
-    fn ready(self: Session, result_callback: ResultCallback, user_data: ?*anyopaque) void {
-        gio.g_dbus_proxy_call(
-            self.session_proxy,
-            "Ready",
-            null,
-            gio.G_DBUS_CALL_FLAGS_NONE,
-            -1,
-            null,
-            GDBusCallClosure.callback,
-            try GDBusCallClosure.init(result_callback, user_data, self.allocator),
-        );
-    }
-
-    pub fn setInputs(self: Session) !void {
-        gio.g_variant_unref(try callWithRetry(
-            self.session_proxy,
-            "UserInputProvide",
-            gio.g_variant_new("(uuus)", @as(u32, 1), @as(u32, 1), @as(u32, 0), self.username.?),
-        ));
-        gio.g_variant_unref(try callWithRetry(
-            self.session_proxy,
-            "UserInputProvide",
-            gio.g_variant_new("(uuus)", @as(u32, 1), @as(u32, 1), @as(u32, 1), self.password.?),
-        ));
-        const totp = try self.generateTotp();
-        defer self.allocator.free(std.mem.span(totp));
-        gio.g_variant_unref(try callWithRetry(
-            self.session_proxy,
-            "UserInputProvide",
-            gio.g_variant_new("(uuus)", @as(u32, 1), @as(u32, 4), @as(u32, 0), totp),
-        ));
-    }
-};
+    // Convert output to null-terminated string, trimming newline
+    result.stdout[result.stdout.len - 1] = 0;
+    return @ptrCast(result.stdout);
+}
 
 const RetryingAsyncTask = struct {
     const default_backoff_ms = 100;
