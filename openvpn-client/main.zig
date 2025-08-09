@@ -38,6 +38,17 @@ fn sigIntCallback(_: ?*anyopaque) callconv(.c) c_int {
     return gio.G_SOURCE_REMOVE;
 }
 
+fn reportGError(g_error: ?*gio.GError) error{GError}!void {
+    if (g_error) |e| {
+        defer gio.g_error_free(e);
+        std.io.getStdOut().writer().print(
+            "Error:\n\tdomain: {s}\n\tcode: {d}\n\tmessage: {s}\n",
+            .{ gio.g_quark_to_string(e.domain), e.code, e.message },
+        ) catch {};
+        return error.GError;
+    }
+}
+
 fn asyncMain(_: gio.gpointer) callconv(.c) void {
     client.ConfigMgrClient.lookupConfigName(
         "daricheh",
@@ -50,13 +61,8 @@ fn asyncMain(_: gio.gpointer) callconv(.c) void {
 
 fn lookupConfigNameReady(config_path: ?[*:0]u8, g_error: ?*gio.GError, _: ?*anyopaque) void {
     defer gio.g_main_loop_quit(main_loop);
-    if (g_error) |e| {
-        defer gio.g_error_free(e);
-        std.io.getStdOut().writer().print(
-            "Error:\n\tdomain: {s}\n\tcode: {d}\n\tmessage: {s}\n",
-            .{ gio.g_quark_to_string(e.domain), e.code, e.message },
-        ) catch {};
-    } else if (config_path) |p| {
+    reportGError(g_error) catch return;
+    if (config_path) |p| {
         defer gio.g_free(p);
         std.io.getStdOut().writer().print("Config path: {s}\n", .{p}) catch {};
     }

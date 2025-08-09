@@ -1,17 +1,6 @@
 const std = @import("std");
 const gio = @import("clibs.zig").gio;
 
-fn reportGError(g_error: ?*gio.GError) error{GError}!void {
-    if (g_error) |e| {
-        defer gio.g_error_free(e);
-        std.io.getStdOut().writer().print(
-            "Error:\n\tdomain: {s}\n\tcode: {d}\n\tmessage: {s}\n",
-            .{ gio.g_quark_to_string(e.domain), e.code, e.message },
-        ) catch {};
-        return error.GError;
-    }
-}
-
 const max_retries = 3;
 
 fn callWithRetry(
@@ -49,7 +38,6 @@ fn callWithRetry(
                 continue;
             }
         }
-        try reportGError(g_error);
         return result.?;
     }
 }
@@ -128,19 +116,6 @@ pub const Session = struct {
         gio.g_dbus_proxy_call(
             self.session_proxy,
             "Ready",
-            null,
-            gio.G_DBUS_CALL_FLAGS_NONE,
-            -1,
-            null,
-            GDBusCallClosure.callback,
-            try GDBusCallClosure.init(result_callback, user_data, self.allocator),
-        );
-    }
-
-    pub fn disconnect(self: Session, result_callback: ResultCallback, user_data: ?*anyopaque) !void {
-        gio.g_dbus_proxy_call(
-            self.session_proxy,
-            "Disconnect",
             null,
             gio.G_DBUS_CALL_FLAGS_NONE,
             -1,
@@ -235,10 +210,7 @@ const RetryingAsyncTask = struct {
                 return true;
             }
         }
-        reportGError(g_error) catch {
-            self.scheduleRetry();
-            return true;
-        };
+        self.scheduleRetry();
         return false;
     }
 
@@ -266,41 +238,6 @@ pub const OpenVPNClient = struct {
     session_proxy: ?*gio.GDBusProxy = null,
     connection_cancellable: *gio.GCancellable,
     disconnecting: bool = false,
-
-    pub fn init(
-        allocator: std.mem.Allocator,
-        credentials: struct { username: []const u8, password: []const u8, totp_secret: []const u8 },
-    ) !OpenVPNClient {
-        return .{
-            .allocator = allocator,
-            .username = try allocator.dupeZ(u8, credentials.username),
-            .password = try allocator.dupeZ(u8, credentials.password),
-            .totp_secret = try allocator.dupe(u8, credentials.totp_secret),
-            .connection_cancellable = gio.g_cancellable_new(),
-        };
-    }
-
-    pub fn deinit(self: *OpenVPNClient) void {
-        self.allocator.free(std.mem.span(self.username));
-        self.allocator.free(std.mem.span(self.password));
-        self.allocator.free(self.totp_secret);
-        if (self.config_path) |p| {
-            gio.free(p);
-        }
-        if (self.session_mgr_proxy) |p| {
-            gio.g_object_unref(p);
-        }
-        if (self.session_path) |p| {
-            gio.free(p);
-        }
-        if (self.log_proxy) |p| {
-            gio.g_object_unref(p);
-        }
-        if (self.session_proxy) |p| {
-            gio.g_object_unref(p);
-        }
-        gio.g_object_unref(self.connection_cancellable);
-    }
 
     fn handleStatusChange(
         _: ?*gio.GDBusProxy,
@@ -410,11 +347,7 @@ pub const OpenVPNClient = struct {
         }
         task.client.session_proxy = proxy;
         std.debug.print("session proxy created\n", .{});
-        if (task.client.disconnecting) {
-            task.reuseWith(disconnect, disconnectReady);
-        } else {
-            task.reuseWith(forwardLog, forwardLogReady);
-        }
+        task.reuseWith(forwardLog, forwardLogReady);
         RetryingAsyncTask.start_callback(task);
     }
 
@@ -484,15 +417,6 @@ pub const OpenVPNClient = struct {
             RetryingAsyncTask.ready_callback,
             task,
         );
-    }
-
-    fn disconnectReady(task: *RetryingAsyncTask, source_object: ?*gio.GObject, res: ?*gio.GAsyncResult) !void {
-        var g_error: ?*gio.GError = null;
-        const result = gio.g_dbus_proxy_call_finish(@ptrCast(source_object), res, &g_error);
-        if (task.should_return(g_error)) return;
-        defer gio.g_variant_unref(result);
-        gio.g_main_loop_quit(task.client.main_loop);
-        task.deinit();
     }
 };
 
