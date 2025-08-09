@@ -23,8 +23,9 @@ pub fn main() !void {
 
 fn asyncMain(_: gio.gpointer) callconv(.c) void {
     client.ConfigMgrClient.lookupConfigName(
-        allocator,
         "daricheh",
+        allocator,
+        null,
         lookupConfigNameReady,
         null,
     ) catch {};

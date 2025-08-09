@@ -545,6 +545,7 @@ pub const ConfigMgrClient = struct {
         backoff_ms: u32,
         retries: u32,
         proxy: ?*gio.GDBusProxy = null,
+        cancellable: ?*gio.GCancellable,
 
         fn deinit(self: *LookupContext) void {
             if (self.proxy) |p| {
@@ -558,15 +559,21 @@ pub const ConfigMgrClient = struct {
         }
     };
 
-    fn shouldReturn(ctx: *LookupContext, g_error: ?*gio.GError, retry_callback: fn (user_data: gio.gpointer) callconv(.c) void) bool {
+    fn shouldReturn(
+        ctx: *LookupContext,
+        g_error: ?*gio.GError,
+        retry_callback: fn (user_data: gio.gpointer) callconv(.c) void,
+    ) bool {
         if (g_error) |e| {
-            if (ctx.retries < @This().max_retries) {
+            const cancelled = gio.g_cancellable_is_cancelled(ctx.cancellable) != gio.FALSE;
+            const retries_exceeded = ctx.retries >= ConfigMgrClient.max_retries;
+            if (cancelled or retries_exceeded) {
+                ctx.callback(null, e, ctx.user_data);
+                destroy(ctx);
+            } else {
                 _ = gio.g_timeout_add_once(ctx.backoff_ms, retry_callback, ctx);
                 ctx.retries += 1;
                 ctx.backoff_ms *= 2;
-            } else {
-                ctx.callback(null, e, ctx.user_data);
-                destroy(ctx);
             }
             return true;
         }
@@ -579,7 +586,13 @@ pub const ConfigMgrClient = struct {
         ctx.allocator.destroy(ctx);
     }
 
-    pub fn lookupConfigName(allocator: std.mem.Allocator, config_name: [*:0]const u8, callback: LookupCallback, user_data: ?*anyopaque) !void {
+    pub fn lookupConfigName(
+        config_name: [*:0]const u8,
+        allocator: std.mem.Allocator,
+        cancellable: ?*gio.GCancellable,
+        callback: LookupCallback,
+        user_data: ?*anyopaque,
+    ) !void {
         const ctx = try allocator.create(LookupContext);
         ctx.allocator = allocator;
         ctx.config_name = config_name;
@@ -587,6 +600,7 @@ pub const ConfigMgrClient = struct {
         ctx.user_data = user_data;
         ctx.backoff_ms = default_backoff_ms;
         ctx.retries = 0;
+        ctx.cancellable = cancellable;
         createProxy(ctx);
     }
 
@@ -599,7 +613,7 @@ pub const ConfigMgrClient = struct {
             "net.openvpn.v3.configuration",
             "/net/openvpn/v3/configuration",
             "net.openvpn.v3.configuration",
-            null,
+            ctx.cancellable,
             proxyReady,
             ctx,
         );
@@ -628,7 +642,7 @@ pub const ConfigMgrClient = struct {
             gio.g_variant_new("(s)", ctx.config_name),
             gio.G_DBUS_CALL_FLAGS_NONE,
             -1,
-            null,
+            ctx.cancellable,
             callLookupConfigNameReady,
             ctx,
         );
