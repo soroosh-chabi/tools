@@ -5,6 +5,7 @@ const client = @import("client.zig");
 
 var main_loop: *gio.GMainLoop = undefined;
 var allocator: std.mem.Allocator = undefined;
+var cancellable: ?*gio.GCancellable = null;
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}).init;
@@ -14,11 +15,27 @@ pub fn main() !void {
     const creds = try credentials.getCredentials(allocator);
     defer creds.deinit();
 
+    cancellable = gio.g_cancellable_new();
+    defer gio.g_object_unref(cancellable);
+
     main_loop = gio.g_main_loop_new(null, gio.FALSE) orelse return error.GError;
     defer gio.g_main_loop_unref(main_loop);
 
+    _ = gio.g_unix_signal_add(
+        std.os.linux.SIG.INT,
+        sigIntCallback,
+        null,
+    );
+
     _ = gio.g_idle_add_once(asyncMain, null);
+
     gio.g_main_loop_run(main_loop);
+}
+
+fn sigIntCallback(_: ?*anyopaque) callconv(.c) c_int {
+    gio.g_cancellable_cancel(cancellable);
+    gio.g_main_loop_quit(main_loop);
+    return gio.G_SOURCE_REMOVE;
 }
 
 fn asyncMain(_: gio.gpointer) callconv(.c) void {

@@ -494,43 +494,6 @@ pub const OpenVPNClient = struct {
         gio.g_main_loop_quit(task.client.main_loop);
         task.deinit();
     }
-
-    pub fn connect(self: *OpenVPNClient) !void {
-        _ = gio.g_unix_signal_add(
-            std.os.linux.SIG.INT,
-            sigIntCallback,
-            self,
-        );
-    }
-
-    fn sigIntCallback(user_data: ?*anyopaque) callconv(.c) c_int {
-        const self: *OpenVPNClient = @alignCast(@ptrCast(user_data));
-        gio.g_cancellable_cancel(self.connection_cancellable);
-        // We definitely have not created a session, so we can quit the main loop
-        if (self.session_mgr_proxy == null) {
-            gio.g_main_loop_quit(self.main_loop);
-        } else {
-            var task: *RetryingAsyncTask = undefined;
-            if (self.session_proxy == null) {
-                self.disconnecting = true;
-                task = RetryingAsyncTask.init(
-                    self.allocator,
-                    createSessionProxy,
-                    createSessionProxyReady,
-                    self,
-                );
-            } else {
-                task = RetryingAsyncTask.init(
-                    self.allocator,
-                    disconnect,
-                    disconnectReady,
-                    self,
-                );
-            }
-            _ = gio.g_idle_add_once(RetryingAsyncTask.start_callback, task);
-        }
-        return gio.G_SOURCE_REMOVE;
-    }
 };
 
 pub const ConfigMgrClient = struct {
