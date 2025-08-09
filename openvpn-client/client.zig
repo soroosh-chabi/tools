@@ -513,6 +513,7 @@ pub const ConfigMgrClient = struct {
         fn deinit(self: *LookupContext) void {
             if (self.proxy) |p| {
                 gio.g_object_unref(p);
+                self.proxy = null;
             }
         }
 
@@ -520,34 +521,34 @@ pub const ConfigMgrClient = struct {
             self.retries = 0;
             self.backoff_ms = default_backoff_ms;
         }
-    };
 
-    fn shouldReturn(
-        ctx: *LookupContext,
-        g_error: ?*gio.GError,
-        retry_callback: fn (user_data: gio.gpointer) callconv(.c) void,
-    ) bool {
-        if (g_error) |e| {
-            const cancelled = gio.g_cancellable_is_cancelled(ctx.cancellable) != gio.FALSE;
-            const retries_exceeded = ctx.retries >= ConfigMgrClient.max_retries;
-            if (cancelled or retries_exceeded) {
-                ctx.callback(null, e, ctx.user_data);
-                destroy(ctx);
-            } else {
-                _ = gio.g_timeout_add_once(ctx.backoff_ms, retry_callback, ctx);
-                ctx.retries += 1;
-                ctx.backoff_ms *= 2;
+        fn shouldReturn(
+            ctx: *LookupContext,
+            g_error: ?*gio.GError,
+            retry_callback: fn (user_data: gio.gpointer) callconv(.c) void,
+        ) bool {
+            if (g_error) |e| {
+                const cancelled = gio.g_cancellable_is_cancelled(ctx.cancellable) != gio.FALSE;
+                const retries_exceeded = ctx.retries >= ConfigMgrClient.max_retries;
+                if (cancelled or retries_exceeded) {
+                    ctx.callback(null, e, ctx.user_data);
+                    destroy(ctx);
+                } else {
+                    _ = gio.g_timeout_add_once(ctx.backoff_ms, retry_callback, ctx);
+                    ctx.retries += 1;
+                    ctx.backoff_ms *= 2;
+                }
+                return true;
             }
-            return true;
+            ctx.resetRetries();
+            return false;
         }
-        ctx.resetRetries();
-        return false;
-    }
 
-    fn destroy(ctx: *LookupContext) void {
-        ctx.deinit();
-        ctx.allocator.destroy(ctx);
-    }
+        fn destroy(ctx: *LookupContext) void {
+            ctx.deinit();
+            ctx.allocator.destroy(ctx);
+        }
+    };
 
     pub fn lookupConfigName(
         config_name: [*:0]const u8,
@@ -590,7 +591,7 @@ pub const ConfigMgrClient = struct {
         const ctx: *LookupContext = @alignCast(@ptrCast(user_data));
         var g_error: ?*gio.GError = null;
         const proxy = gio.g_dbus_proxy_new_for_bus_finish(res, &g_error);
-        if (shouldReturn(ctx, g_error, createProxy)) {
+        if (LookupContext.shouldReturn(ctx, g_error, createProxy)) {
             return;
         }
         ctx.proxy = proxy;
@@ -619,21 +620,21 @@ pub const ConfigMgrClient = struct {
         const ctx: *LookupContext = @alignCast(@ptrCast(user_data));
         var g_error: ?*gio.GError = null;
         const result = gio.g_dbus_proxy_call_finish(@ptrCast(source_object), res, &g_error);
-        if (shouldReturn(ctx, g_error, callLookupConfigName)) {
+        if (LookupContext.shouldReturn(ctx, g_error, callLookupConfigName)) {
             return;
         }
         defer gio.g_variant_unref(result);
         const expected_type = gio.g_variant_type_new("(ao)");
         defer gio.g_variant_type_free(expected_type);
         if (gio.g_variant_is_of_type(result, expected_type) == gio.FALSE) {
-            _ = shouldReturn(ctx, gio.g_error_new_literal(
+            _ = LookupContext.shouldReturn(ctx, gio.g_error_new_literal(
                 gio.g_io_error_quark(),
                 gio.G_IO_ERROR_FAILED,
                 "Invalid response from configuration manager",
             ), callLookupConfigName);
             return;
         }
-        defer destroy(ctx);
+        defer LookupContext.destroy(ctx);
         const config_paths = gio.g_variant_get_child_value(result, 0);
         defer gio.g_variant_unref(config_paths);
         var config_path: ?[*:0]u8 = null;
