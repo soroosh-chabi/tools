@@ -528,9 +528,13 @@ pub const ConfigMgrClient = struct {
             retry_callback: fn (user_data: gio.gpointer) callconv(.c) void,
         ) bool {
             if (g_error) |e| {
+                // When OpenVPN services are idle, they stop running. So ocassionally when we call a service, we will also
+                // be activating it. As a result, the first call might fail with a "unknown method" error because the service
+                // is not fully initialized yet and we need to retry.
+                const unknown_method = e.domain == gio.g_dbus_error_quark() and e.code == gio.G_DBUS_ERROR_UNKNOWN_METHOD;
                 const cancelled = gio.g_cancellable_is_cancelled(ctx.cancellable) != gio.FALSE;
                 const retries_exceeded = ctx.retries >= ConfigMgrClient.max_retries;
-                if (cancelled or retries_exceeded) {
+                if (!unknown_method or cancelled or retries_exceeded) {
                     ctx.callback(null, e, ctx.user_data);
                     destroy(ctx);
                 } else {
@@ -634,7 +638,6 @@ pub const ConfigMgrClient = struct {
             ), callLookupConfigName);
             return;
         }
-        defer LookupContext.destroy(ctx);
         const config_paths = gio.g_variant_get_child_value(result, 0);
         defer gio.g_variant_unref(config_paths);
         var config_path: ?[*:0]u8 = null;
@@ -642,5 +645,6 @@ pub const ConfigMgrClient = struct {
             gio.g_variant_get_child(config_paths, 0, "o", &config_path);
         }
         ctx.callback(config_path, null, ctx.user_data);
+        LookupContext.destroy(ctx);
     }
 };
