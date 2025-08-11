@@ -30,18 +30,42 @@ pub fn main() !void {
         try stdout.writeAll("Saved encrypted credentials to file\n");
     }
 
-    var session_factory = try client.SessionFactory.init(allocator);
-    defer session_factory.deinit();
+    var config_manager = try client.ConfigManager.init();
+    defer config_manager.deinit();
 
-    var session = try session_factory.newSession(cred_file.credentials.config_name.?);
+    var session_manager = try client.SessionManager.init();
+    defer session_manager.deinit();
+
+    const config_path = (try config_manager.LookupConfigName(allocator, cred_file.credentials.config_name.?)).?;
+    defer allocator.free(config_path);
+
+    const session = try session_manager.createNewTunnel(allocator, config_path);
     defer session.deinit();
-
-    try session.setCredentials(.{
-        .username = cred_file.credentials.username.?,
-        .password = cred_file.credentials.password.?,
-        .totp_secret = cred_file.credentials.totp_secret.?,
-    });
-    try session.setInputs();
-    try session.connect();
     defer session.disconnect() catch {};
+    try session.connect();
+}
+
+fn generateTotp(allocator: std.mem.Allocator, totp_secret: []const u8) ![]u8 {
+    // Build oathtool command
+    const argv = [_][]const u8{
+        "oathtool",
+        "--totp",
+        "-d6",
+        "-b",
+        totp_secret,
+    };
+
+    // Execute oathtool and capture output
+    const result = try std.process.Child.run(.{
+        .allocator = allocator,
+        .argv = &argv,
+    });
+    defer allocator.free(result.stderr);
+    errdefer allocator.free(result.stdout);
+    if (result.stderr.len > 0) {
+        try std.io.getStdOut().writer().print("Generating TOTP failed: {s}\n", .{result.stderr});
+        return error.TOTPError;
+    }
+    // Trim newline
+    return result.stdout[0 .. result.stdout.len - 1];
 }

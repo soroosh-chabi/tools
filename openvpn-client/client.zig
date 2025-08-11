@@ -57,14 +57,12 @@ fn callWithRetry(
     }
 }
 
-pub const SessionFactory = struct {
-    config_mgr_proxy: *gio.GDBusProxy,
-    session_mgr_proxy: *gio.GDBusProxy,
-    allocator: std.mem.Allocator,
+pub const ConfigManager = struct {
+    proxy: *gio.GDBusProxy,
 
-    pub fn init(allocator: std.mem.Allocator) !SessionFactory {
+    pub fn init() !ConfigManager {
         return .{
-            .config_mgr_proxy = blk: {
+            .proxy = blk: {
                 var g_error: ?*gio.GError = null;
                 const proxy = gio.g_dbus_proxy_new_for_bus_sync(
                     gio.G_BUS_TYPE_SYSTEM,
@@ -79,7 +77,41 @@ pub const SessionFactory = struct {
                 try reportGError(g_error);
                 break :blk proxy;
             },
-            .session_mgr_proxy = blk: {
+        };
+    }
+
+    pub fn deinit(self: ConfigManager) void {
+        gio.g_object_unref(self.proxy);
+    }
+
+    pub fn LookupConfigName(self: ConfigManager, allocator: std.mem.Allocator, config_name: []const u8) !?[]u8 {
+        const config_name_c = try allocator.dupeZ(u8, config_name);
+        defer allocator.free(config_name_c);
+        const result = try callWithRetry(self.proxy, "LookupConfigName", gio.g_variant_new("(s)", config_name_c.ptr));
+        defer gio.g_variant_unref(result);
+        const expected_type = gio.g_variant_type_new("(ao)");
+        defer gio.g_variant_type_free(expected_type);
+        if (gio.g_variant_is_of_type(result, expected_type) == gio.FALSE) {
+            return error.GError;
+        }
+        const config_paths = gio.g_variant_get_child_value(result, 0);
+        defer gio.g_variant_unref(config_paths);
+        if (gio.g_variant_n_children(config_paths) == 0) {
+            return null;
+        }
+        var config_path: [*:0]u8 = undefined;
+        gio.g_variant_get_child(config_paths, 0, "o", &config_path);
+        defer gio.g_free(config_path);
+        return try allocator.dupe(u8, std.mem.span(config_path));
+    }
+};
+
+pub const SessionManager = struct {
+    proxy: *gio.GDBusProxy,
+
+    pub fn init() !SessionManager {
+        return .{
+            .proxy = blk: {
                 var g_error: ?*gio.GError = null;
                 const proxy = gio.g_dbus_proxy_new_for_bus_sync(
                     gio.G_BUS_TYPE_SYSTEM,
@@ -94,57 +126,37 @@ pub const SessionFactory = struct {
                 try reportGError(g_error);
                 break :blk proxy;
             },
-            .allocator = allocator,
         };
     }
 
-    pub fn deinit(self: SessionFactory) void {
-        gio.g_object_unref(self.config_mgr_proxy);
-        gio.g_object_unref(self.session_mgr_proxy);
+    pub fn deinit(self: SessionManager) void {
+        gio.g_object_unref(self.proxy);
     }
 
-    fn getConfigPath(self: SessionFactory, config_name: []const u8) ![*:0]u8 {
-        const config_name_c = try self.allocator.dupeZ(u8, config_name);
-        defer self.allocator.free(config_name_c);
+    pub fn createNewTunnel(self: SessionManager, allocator: std.mem.Allocator, config_path: []const u8) !Session {
+        const config_path_c = try allocator.dupeZ(u8, config_path);
+        defer allocator.free(config_path_c);
         const result = try callWithRetry(
-            self.config_mgr_proxy,
-            "LookupConfigName",
-            gio.g_variant_new("(s)", config_name_c.ptr),
-        );
-        defer gio.g_variant_unref(result);
-        const config_paths = gio.g_variant_get_child_value(result, 0);
-        defer gio.g_variant_unref(config_paths);
-        var config_path: [*:0]u8 = undefined;
-        gio.g_variant_get_child(config_paths, 0, "o", &config_path);
-        return config_path;
-    }
-
-    fn createNewTunnel(self: SessionFactory, config_path: [*:0]const u8) !Session {
-        const result = try callWithRetry(
-            self.session_mgr_proxy,
+            self.proxy,
             "NewTunnel",
-            gio.g_variant_new("(o)", config_path),
+            gio.g_variant_new("(o)", config_path_c.ptr),
         );
         defer gio.g_variant_unref(result);
+        const expected_type = gio.g_variant_type_new("(o)");
+        defer gio.g_variant_type_free(expected_type);
+        if (gio.g_variant_is_of_type(result, expected_type) == gio.FALSE) {
+            return error.GError;
+        }
         var session_path: [*:0]u8 = undefined;
         gio.g_variant_get_child(result, 0, "o", &session_path);
         defer gio.g_free(session_path);
-        return try Session.init(self.allocator, session_path);
-    }
-
-    pub fn newSession(self: SessionFactory, config_name: []const u8) !Session {
-        const config_path = try self.getConfigPath(config_name);
-        defer gio.g_free(config_path);
-        return try self.createNewTunnel(config_path);
+        return try Session.init(allocator, session_path);
     }
 };
 
 pub const Session = struct {
     proxy: *gio.GDBusProxy,
     allocator: std.mem.Allocator,
-    username: ?[*:0]u8 = null,
-    password: ?[*:0]u8 = null,
-    totp_secret: ?[]u8 = null,
 
     fn init(allocator: std.mem.Allocator, session_path: [*:0]const u8) !Session {
         var g_error: ?*gio.GError = null;
@@ -159,73 +171,11 @@ pub const Session = struct {
             &g_error,
         );
         try reportGError(g_error);
-        _ = gio.g_signal_connect_data(
-            proxy,
-            "g-signal::StatusChange",
-            gio.G_CALLBACK(handleStatusChange),
-            null,
-            null,
-            gio.G_CONNECT_DEFAULT,
-        );
         return .{ .proxy = proxy, .allocator = allocator };
     }
 
     pub fn deinit(self: Session) void {
         gio.g_object_unref(self.proxy);
-        if (self.username) |username| {
-            self.allocator.free(std.mem.span(username));
-        }
-        if (self.password) |password| {
-            self.allocator.free(std.mem.span(password));
-        }
-        if (self.totp_secret) |totp_secret| {
-            self.allocator.free(totp_secret);
-        }
-    }
-
-    fn handleStatusChange(
-        _: *gio.GDBusProxy,
-        sender_name: [*:0]u8,
-        signal_name: [*:0]u8,
-        _: *gio.GVariant,
-        _: gio.gpointer,
-    ) callconv(.c) void {
-        std.debug.print("Sender: {s}\nSignal: {s}\n", .{ sender_name, signal_name });
-    }
-
-    pub fn setCredentials(
-        self: *Session,
-        credentials: struct { username: []const u8, password: []const u8, totp_secret: []const u8 },
-    ) !void {
-        self.username = try self.allocator.dupeZ(u8, credentials.username);
-        self.password = try self.allocator.dupeZ(u8, credentials.password);
-        self.totp_secret = try self.allocator.dupe(u8, credentials.totp_secret);
-    }
-
-    fn generateTotp(self: Session) ![*:0]u8 {
-        // Build oathtool command
-        const argv = [_][]const u8{
-            "oathtool",
-            "--totp",
-            "-d6",
-            "-b",
-            self.totp_secret.?,
-        };
-
-        // Execute oathtool and capture output
-        const result = try std.process.Child.run(.{
-            .allocator = self.allocator,
-            .argv = &argv,
-        });
-        defer self.allocator.free(result.stderr);
-        errdefer self.allocator.free(result.stdout);
-        if (result.stderr.len > 0) {
-            try std.io.getStdOut().writer().print("Generating TOTP failed: {s}\n", .{result.stderr});
-            return error.TOTPError;
-        }
-        // Convert output to null-terminated string, trimming newline
-        result.stdout[result.stdout.len - 1] = 0;
-        return @ptrCast(result.stdout);
     }
 
     pub fn connect(self: Session) !void {
