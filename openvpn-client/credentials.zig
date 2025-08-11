@@ -31,88 +31,107 @@ fn askSecret(allocator: std.mem.Allocator, prompt: []const u8, max_length: usize
     return secret;
 }
 
-const Credentials = struct {
+pub const Credentials = struct {
     pub const max_length = 1024;
 
     allocator: std.mem.Allocator,
-    username: ?[]const u8 = null,
-    password: ?[]const u8 = null,
-    totp_secret: ?[]const u8 = null,
-    config_name: ?[]const u8 = null,
+    username: []const u8,
+    password: []const u8,
+    totp_secret: []const u8,
+    config_name: []const u8,
 
     pub fn deinit(self: Credentials) void {
-        if (self.username) |username| self.allocator.free(username);
-        if (self.password) |password| self.allocator.free(password);
-        if (self.totp_secret) |totp_secret| self.allocator.free(totp_secret);
-        if (self.config_name) |config_name| self.allocator.free(config_name);
+        self.allocator.free(self.username);
+        self.allocator.free(self.password);
+        self.allocator.free(self.totp_secret);
+        self.allocator.free(self.config_name);
     }
 
     fn serialize(self: Credentials, writer: anytype) !void {
-        try writer.print("username={s}\npassword={s}\ntotp_secret={s}\nconfig_name={s}\n", .{ self.username orelse "", self.password orelse "", self.totp_secret orelse "", self.config_name orelse "" });
+        try writer.print("username={s}\npassword={s}\ntotp_secret={s}\nconfig_name={s}\n", .{ self.username, self.password, self.totp_secret, self.config_name });
     }
 
-    fn deserialize(self: *Credentials, reader: anytype) !void {
-        self.deinit();
-
+    fn deserialize(allocator: std.mem.Allocator, reader: anytype) !Credentials {
         // Read entire content and parse key=value pairs without loops
-        const content = try reader.readAllAlloc(self.allocator, (max_length + 20) * 4);
-        defer self.allocator.free(content);
+        const content = try reader.readAllAlloc(allocator, (max_length + 20) * 4);
+        defer allocator.free(content);
 
         // Parse each field directly using string operations
         const username_start = std.mem.indexOf(u8, content, "username=") orelse return error.MissingUsername;
         const username_line_start = username_start + 9; // "username=".len
         const username_end = std.mem.indexOf(u8, content[username_line_start..], "\n") orelse return error.MissingUsername;
-        self.username = try self.allocator.dupe(u8, content[username_line_start .. username_line_start + username_end]);
+        const username = try allocator.dupe(u8, content[username_line_start .. username_line_start + username_end]);
+        errdefer allocator.free(username);
 
         const password_start = std.mem.indexOf(u8, content, "password=") orelse return error.MissingPassword;
         const password_line_start = password_start + 9; // "password=".len
         const password_end = std.mem.indexOf(u8, content[password_line_start..], "\n") orelse return error.MissingPassword;
-        self.password = try self.allocator.dupe(u8, content[password_line_start .. password_line_start + password_end]);
+        const password = try allocator.dupe(u8, content[password_line_start .. password_line_start + password_end]);
+        errdefer allocator.free(password);
 
         const totp_start = std.mem.indexOf(u8, content, "totp_secret=") orelse return error.MissingTotpSecret;
         const totp_line_start = totp_start + 12; // "totp_secret=".len
         const totp_end = std.mem.indexOf(u8, content[totp_line_start..], "\n") orelse return error.MissingTotpSecret;
-        self.totp_secret = try self.allocator.dupe(u8, content[totp_line_start .. totp_line_start + totp_end]);
+        const totp_secret = try allocator.dupe(u8, content[totp_line_start .. totp_line_start + totp_end]);
+        errdefer allocator.free(totp_secret);
 
         const config_start = std.mem.indexOf(u8, content, "config_name=") orelse return error.MissingConfigName;
         const config_line_start = config_start + 12; // "config_name=".len
         const config_end = std.mem.indexOf(u8, content[config_line_start..], "\n") orelse return error.MissingConfigName;
-        self.config_name = try self.allocator.dupe(u8, content[config_line_start .. config_line_start + config_end]);
+        const config_name = try allocator.dupe(u8, content[config_line_start .. config_line_start + config_end]);
+        errdefer allocator.free(config_name);
+
+        return .{
+            .allocator = allocator,
+            .username = username,
+            .password = password,
+            .totp_secret = totp_secret,
+            .config_name = config_name,
+        };
     }
 
-    fn ask(self: *Credentials) !void {
-        self.deinit();
-
+    fn ask(allocator: std.mem.Allocator) !Credentials {
         const stdin = std.io.getStdIn();
         const stdout = std.io.getStdOut();
 
         // Get username
         try stdout.writeAll("Enter username: ");
-        self.username = try stdin.reader().readUntilDelimiterAlloc(
-            self.allocator,
+        const username = try stdin.reader().readUntilDelimiterAlloc(
+            allocator,
             '\n',
             Credentials.max_length,
         );
+        errdefer allocator.free(username);
 
         // Get password (without echo)
-        self.password = try askSecret(self.allocator, "Enter password: ", Credentials.max_length);
+        const password = try askSecret(allocator, "Enter password: ", Credentials.max_length);
+        errdefer allocator.free(password);
 
         // Get TOTP secret (without echo)
-        self.totp_secret = try askSecret(self.allocator, "Enter TOTP secret: ", Credentials.max_length);
+        const totp_secret = try askSecret(allocator, "Enter TOTP secret: ", Credentials.max_length);
+        errdefer allocator.free(totp_secret);
 
         // Get config name
         try stdout.writeAll("Enter config name: ");
-        self.config_name = try stdin.reader().readUntilDelimiterAlloc(
-            self.allocator,
+        const config_name = try stdin.reader().readUntilDelimiterAlloc(
+            allocator,
             '\n',
             Credentials.max_length,
         );
+        errdefer allocator.free(config_name);
+
+        return .{
+            .allocator = allocator,
+            .username = username,
+            .password = password,
+            .totp_secret = totp_secret,
+            .config_name = config_name,
+        };
     }
 };
 
-pub const EncryptedCredentialsFile = struct {
+const EncryptedCredentialsFile = struct {
     file_path: []const u8,
-    credentials: Credentials,
     allocator: std.mem.Allocator,
 
     const AesGcm = crypto.aead.aes_gcm.Aes256Gcm;
@@ -121,13 +140,11 @@ pub const EncryptedCredentialsFile = struct {
     pub fn init(allocator: std.mem.Allocator, file_path: []const u8) !EncryptedCredentialsFile {
         return .{
             .file_path = try allocator.dupe(u8, file_path),
-            .credentials = Credentials{ .allocator = allocator },
             .allocator = allocator,
         };
     }
 
     pub fn deinit(self: *EncryptedCredentialsFile) void {
-        self.credentials.deinit();
         self.allocator.free(self.file_path);
     }
 
@@ -197,13 +214,13 @@ pub const EncryptedCredentialsFile = struct {
         return decrypted;
     }
 
-    fn save(self: *EncryptedCredentialsFile) !void {
+    pub fn save(self: *EncryptedCredentialsFile, credentials: Credentials) !void {
         // Serialize credentials to string
         var buffer = std.ArrayList(u8).init(self.allocator);
         defer buffer.deinit();
 
         const writer = buffer.writer();
-        try self.credentials.serialize(writer);
+        try credentials.serialize(writer);
 
         // Ask for master password
         const master_password = try askSecret(self.allocator, "Enter master password to encrypt credentials: ", Credentials.max_length);
@@ -220,7 +237,7 @@ pub const EncryptedCredentialsFile = struct {
         try file.writeAll(encrypted);
     }
 
-    pub fn load(self: *EncryptedCredentialsFile) !void {
+    pub fn load(self: *EncryptedCredentialsFile) !Credentials {
         // Read encrypted data from file
         const file = try std.fs.openFileAbsolute(self.file_path, .{});
         defer file.close();
@@ -238,20 +255,34 @@ pub const EncryptedCredentialsFile = struct {
 
         // Parse the decrypted data
         var stream = std.io.fixedBufferStream(decrypted);
-        const reader = stream.reader();
-        try self.credentials.deserialize(reader);
+        return try Credentials.deserialize(self.allocator, stream.reader());
     }
 
-    pub fn exists(self: *EncryptedCredentialsFile) bool {
-        if (std.fs.cwd().access(self.file_path, .{})) {
-            return true;
-        } else |_| {
-            return false;
+    pub fn getCredentials(self: *EncryptedCredentialsFile) !Credentials {
+        if (self.load()) |credentials| {
+            return credentials;
+        } else |err| switch (err) {
+            error.FileNotFound => {
+                const credentials = try Credentials.ask(self.allocator);
+                try self.save(credentials);
+                return credentials;
+            },
+            else => return err,
         }
     }
-
-    pub fn askAndSave(self: *EncryptedCredentialsFile) !void {
-        try self.credentials.ask();
-        try self.save();
-    }
 };
+
+pub fn getCredentials(allocator: std.mem.Allocator) !Credentials {
+    // Get current working directory and create absolute path
+    const cwd = try std.fs.cwd().realpathAlloc(allocator, ".");
+    defer allocator.free(cwd);
+
+    const cred_filename = "credentials.enc";
+    const cred_path = try std.fs.path.join(allocator, &[_][]const u8{ cwd, cred_filename });
+    defer allocator.free(cred_path);
+
+    var cred_file = try EncryptedCredentialsFile.init(allocator, cred_path);
+    defer cred_file.deinit();
+
+    return try cred_file.getCredentials();
+}

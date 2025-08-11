@@ -7,28 +7,8 @@ pub fn main() !void {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    const stdout = std.io.getStdOut();
-
-    // Get current working directory and create absolute path
-    const cwd = try std.fs.cwd().realpathAlloc(allocator, ".");
-    defer allocator.free(cwd);
-
-    const cred_filename = "credentials.enc";
-    const cred_path = try std.fs.path.join(allocator, &[_][]const u8{ cwd, cred_filename });
-    defer allocator.free(cred_path);
-
-    var cred_file = try credentials.EncryptedCredentialsFile.init(allocator, cred_path);
-    defer cred_file.deinit();
-
-    if (cred_file.exists()) {
-        // Load existing credentials
-        try cred_file.load();
-        try stdout.writeAll("Loaded encrypted credentials from file\n");
-    } else {
-        // Ask for new credentials and save them
-        try cred_file.askAndSave();
-        try stdout.writeAll("Saved encrypted credentials to file\n");
-    }
+    const creds = try credentials.getCredentials(allocator);
+    defer creds.deinit();
 
     var config_manager = try client.ConfigManager.init();
     defer config_manager.deinit();
@@ -36,7 +16,7 @@ pub fn main() !void {
     var session_manager = try client.SessionManager.init();
     defer session_manager.deinit();
 
-    const config_path = (try config_manager.LookupConfigName(allocator, cred_file.credentials.config_name.?)).?;
+    const config_path = (try config_manager.LookupConfigName(allocator, creds.config_name)).?;
     defer allocator.free(config_path);
 
     const session = try session_manager.createNewTunnel(allocator, config_path);
