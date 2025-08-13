@@ -1,8 +1,6 @@
 const std = @import("std");
 
-pub const gio = @cImport({
-    @cInclude("gio/gio.h");
-});
+const gio = @import("clibs.zig").gio;
 
 fn reportGError(g_error: ?*gio.GError) !void {
     if (g_error) |e| {
