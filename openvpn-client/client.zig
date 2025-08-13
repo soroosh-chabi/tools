@@ -154,6 +154,7 @@ pub const SessionManager = struct {
 
 pub const Session = struct {
     proxy: *gio.GDBusProxy,
+    log_proxy: ?*gio.GDBusProxy = null,
     allocator: std.mem.Allocator,
 
     fn init(allocator: std.mem.Allocator, session_path: [*:0]const u8) !Session {
@@ -174,6 +175,9 @@ pub const Session = struct {
 
     pub fn deinit(self: Session) void {
         gio.g_object_unref(self.proxy);
+        if (self.log_proxy) |proxy| {
+            gio.g_object_unref(proxy);
+        }
     }
 
     pub fn connect(self: Session) !void {
@@ -204,7 +208,11 @@ pub const Session = struct {
         ));
     }
 
-    pub fn forwardLogs(self: Session) !void {
+    pub fn listenToStatusChange(
+        self: *Session,
+        callback: *const fn (_: *gio.GDBusProxy, _: [*:0]u8, _: [*:0]u8, _: *gio.GVariant, _: ?*anyopaque) callconv(.c) void,
+        user_data: ?*anyopaque,
+    ) !void {
         var g_error: ?*gio.GError = null;
         const result = gio.g_dbus_proxy_call_sync(
             self.proxy,
@@ -217,5 +225,25 @@ pub const Session = struct {
         );
         try reportGError(g_error);
         gio.g_variant_unref(result);
+        self.log_proxy = gio.g_dbus_proxy_new_for_bus_sync(
+            gio.G_BUS_TYPE_SYSTEM,
+            gio.G_DBUS_PROXY_FLAGS_NONE,
+            null,
+            "net.openvpn.v3.log",
+            gio.g_dbus_proxy_get_object_path(self.proxy),
+            "net.openvpn.v3.backends",
+            null,
+            &g_error,
+        );
+        try reportGError(g_error);
+        if (gio.g_signal_connect_data(
+            self.log_proxy.?,
+            "g-signal::StatusChange",
+            gio.G_CALLBACK(callback),
+            user_data,
+            null,
+            gio.G_CONNECT_DEFAULT,
+        ) <= 0)
+            return error.GError;
     }
 };
