@@ -22,6 +22,9 @@ pub fn main() !void {
     const session = try session_manager.createNewTunnel(allocator, config_path);
     defer session.deinit();
     defer session.disconnect() catch {};
+
+    try session.forwardLogs();
+
     try session.connect();
 }
 

@@ -203,4 +203,19 @@ pub const Session = struct {
             gio.g_variant_new("(uuus)", @as(u32, 1), @as(u32, 4), @as(u32, 0), totp),
         ));
     }
+
+    pub fn forwardLogs(self: Session) !void {
+        var g_error: ?*gio.GError = null;
+        const result = gio.g_dbus_proxy_call_sync(
+            self.proxy,
+            "LogForward",
+            gio.g_variant_new("(b)", gio.TRUE),
+            gio.G_DBUS_CALL_FLAGS_NONE,
+            -1,
+            null,
+            &g_error,
+        );
+        try reportGError(g_error);
+        gio.g_variant_unref(result);
+    }
 };
