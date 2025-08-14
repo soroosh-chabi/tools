@@ -61,6 +61,7 @@ fn statusChangedHandler(session: client.Session, major: u32, minor: u32, message
                     stdOut.writeAll("and not ready.\n") catch {};
                 }
             },
+            12 => stdOut.writeAll("Reconnecting...\n") catch {},
             else => stdOut.print("Status change: {d}.{d}: {s}\n", .{ major, minor, message }) catch {},
         }
     } else {
