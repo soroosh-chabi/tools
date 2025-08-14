@@ -6,7 +6,7 @@ const client = @import("client.zig");
 var allocator: std.mem.Allocator = undefined;
 var config_path: []const u8 = undefined;
 var session_manager: client.SessionManager = undefined;
-var session: client.Session = undefined;
+var session: ?client.Session = null;
 var creds: credentials.Credentials = undefined;
 
 pub fn main() !void {
@@ -27,8 +27,7 @@ pub fn main() !void {
     defer allocator.free(config_path);
 
     try startSession();
-    defer session.deinit();
-    defer session.disconnect() catch {};
+    defer endSession();
 
     const main_loop = gio.g_main_loop_new(null, gio.FALSE) orelse return;
     defer gio.g_main_loop_unref(main_loop);
@@ -39,13 +38,22 @@ pub fn main() !void {
 }
 
 fn startSession() !void {
+    endSession();
     session = try session_manager.createNewTunnel(allocator, config_path);
 
-    try session.listenToStatusChange(statusChangedHandler, .{});
-    try session.listenToAttentionRequired(attentionRequiredHandler, .{});
+    try session.?.listenToStatusChange(statusChangedHandler, .{});
+    try session.?.listenToAttentionRequired(attentionRequiredHandler, .{});
 
     const thread = try std.Thread.spawn(.{}, connect, .{});
     defer thread.join();
+}
+
+fn endSession() void {
+    if (session) |s| {
+        s.disconnect() catch {};
+        s.deinit();
+    }
+    session = null;
 }
 
 fn sigIntHandler(user_data: ?*anyopaque) callconv(.c) gio.gboolean {
@@ -66,7 +74,7 @@ fn statusChangedHandler(major: u32, minor: u32, message: []const u8) void {
             9 => stdOut.writeAll("disconnected.\n") catch {},
             11 => {
                 stdOut.writeAll("authentication failed ") catch {};
-                if (session.ready()) {
+                if (session.?.ready()) {
                     stdOut.writeAll("but ready!\n") catch {};
                 } else |_| {
                     stdOut.writeAll("and not ready.\n") catch {};
@@ -87,12 +95,12 @@ fn attentionRequiredHandler(@"type": u32, group: u32, message: []const u8) void 
 fn connect() !void {
     const totp = try generateTotp(creds.totp_secret);
     defer allocator.free(totp);
-    try session.setInputs(.{
+    try session.?.setInputs(.{
         .username = creds.username,
         .password = creds.password,
         .totp = totp,
     });
-    try session.connect();
+    try session.?.connect();
 }
 
 fn generateTotp(totp_secret: []const u8) ![]u8 {
