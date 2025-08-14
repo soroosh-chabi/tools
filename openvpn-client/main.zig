@@ -30,6 +30,7 @@ pub fn main() !void {
     _ = gio.g_unix_signal_add(std.os.linux.SIG.INT, sigIntHandler, main_loop);
 
     try session.listenToStatusChange(statusChangedHandler, .{});
+    try session.listenToAttentionRequired(attentionRequiredHandler, .{});
 
     const thread = try std.Thread.spawn(.{}, connect, .{ allocator, session, creds });
     defer thread.join();
@@ -58,6 +59,10 @@ fn statusChangedHandler(major: u32, minor: u32, message: []const u8) void {
     } else {
         stdOut.print("Status change: {d}.{d}: {s}\n", .{ major, minor, message }) catch {};
     }
+}
+
+fn attentionRequiredHandler(@"type": u32, group: u32, message: []const u8) void {
+    std.debug.print("Attention required: {d}.{d}: {s}\n", .{ @"type", group, message });
 }
 
 fn connect(allocator: std.mem.Allocator, session: client.Session, creds: credentials.Credentials) !void {

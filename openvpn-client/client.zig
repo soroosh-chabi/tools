@@ -320,4 +320,34 @@ pub const Session = struct {
     fn statusChangePostArgsDeinit(args: struct { u32, u32, []const u8 }) void {
         gio.g_free(@constCast(args[2].ptr));
     }
+
+    pub fn listenToAttentionRequired(self: *Session, callback: anytype, pre_args: anytype) !void {
+        const AttentionRequiredClosure = PreArgsClosure(@TypeOf(callback), 3);
+        _ = gio.g_signal_connect_data(
+            self.proxy,
+            "g-signal::AttentionRequired",
+            gio.G_CALLBACK(AttentionRequiredClosure.c_handler),
+            try AttentionRequiredClosure.init(
+                self.allocator,
+                callback,
+                pre_args,
+                attentionRequiredPostArgsExtractor,
+                attentionRequiredPostArgsDeinit,
+            ),
+            AttentionRequiredClosure.destroy_data,
+            gio.G_CONNECT_DEFAULT,
+        );
+    }
+
+    fn attentionRequiredPostArgsExtractor(_: *gio.GDBusProxy, _: [*:0]u8, _: [*:0]u8, parameters: *gio.GVariant) struct { u32, u32, []const u8 } {
+        var @"type": u32 = undefined;
+        var group: u32 = undefined;
+        var message: [*:0]u8 = undefined;
+        gio.g_variant_get(parameters, "(uus)", &@"type", &group, &message);
+        return .{ @"type", group, std.mem.span(message) };
+    }
+
+    fn attentionRequiredPostArgsDeinit(args: struct { u32, u32, []const u8 }) void {
+        gio.g_free(@constCast(args[2].ptr));
+    }
 };
