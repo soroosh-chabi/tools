@@ -8,6 +8,7 @@ var config_path: []const u8 = undefined;
 var session_manager: client.SessionManager = undefined;
 var session: ?client.Session = null;
 var creds: credentials.Credentials = undefined;
+var main_loop: *gio.GMainLoop = undefined;
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -29,10 +30,10 @@ pub fn main() !void {
     try startSession();
     defer endSession();
 
-    const main_loop = gio.g_main_loop_new(null, gio.FALSE) orelse return;
+    main_loop = gio.g_main_loop_new(null, gio.FALSE) orelse return;
     defer gio.g_main_loop_unref(main_loop);
 
-    _ = gio.g_unix_signal_add(std.os.linux.SIG.INT, sigIntHandler, main_loop);
+    _ = gio.g_unix_signal_add(std.os.linux.SIG.INT, sigIntHandler, null);
 
     gio.g_main_loop_run(main_loop);
 }
@@ -56,10 +57,14 @@ fn endSession() void {
     session = null;
 }
 
-fn sigIntHandler(user_data: ?*anyopaque) callconv(.c) gio.gboolean {
-    std.debug.print("quitting...\n", .{});
-    gio.g_main_loop_quit(@ptrCast(user_data));
+fn sigIntHandler(_: ?*anyopaque) callconv(.c) gio.gboolean {
+    quit();
     return gio.FALSE;
+}
+
+fn quit() void {
+    std.io.getStdOut().writeAll("Quitting...\n") catch {};
+    gio.g_main_loop_quit(main_loop);
 }
 
 fn statusChangedHandler(major: u32, minor: u32, message: []const u8) void {
@@ -71,7 +76,13 @@ fn statusChangedHandler(major: u32, minor: u32, message: []const u8) void {
             6 => stdOut.writeAll("connecting...\n") catch {},
             7 => stdOut.writeAll("connected.\n") catch {},
             8 => stdOut.writeAll("disconnecting...\n") catch {},
-            9 => stdOut.writeAll("disconnected.\n") catch {},
+            9 => {
+                stdOut.writeAll("disconnected.\n") catch {};
+                startSession() catch {
+                    stdOut.writeAll("Failed to reconnect.\n") catch {};
+                    quit();
+                };
+            },
             11 => {
                 stdOut.writeAll("authentication failed ") catch {};
                 if (session.?.ready()) {
