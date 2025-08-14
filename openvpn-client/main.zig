@@ -29,7 +29,7 @@ pub fn main() !void {
 
     _ = gio.g_unix_signal_add(std.os.linux.SIG.INT, sigIntHandler, main_loop);
 
-    try session.listenToStatusChange(statusChangedHandler, null);
+    try session.listenToStatusChange(statusChangedHandler, .{});
 
     const thread = try std.Thread.spawn(.{}, client.Session.connect, .{session});
     defer thread.join();
@@ -43,7 +43,7 @@ fn sigIntHandler(user_data: ?*anyopaque) callconv(.c) gio.gboolean {
     return gio.FALSE;
 }
 
-fn statusChangedHandler(_: ?*anyopaque, major: u32, minor: u32, message: []const u8) void {
+fn statusChangedHandler(major: u32, minor: u32, message: []const u8) void {
     std.debug.print("Status Changed. {d}.{d}: {s}\n", .{ major, minor, message });
 }
 

@@ -152,33 +152,43 @@ pub const SessionManager = struct {
     }
 };
 
-pub const StatusChangeCallback = *const fn (user_data: ?*anyopaque, major: u32, minor: u32, message: []const u8) void;
-const StatusChangeClosure = struct {
-    user_callback: StatusChangeCallback,
-    user_data: ?*anyopaque,
-    allocator: std.mem.Allocator,
-
-    fn init(allocator: std.mem.Allocator, user_callback: StatusChangeCallback, user_data: ?*anyopaque) !*StatusChangeClosure {
-        const self = try allocator.create(StatusChangeClosure);
-        self.user_callback = user_callback;
-        self.user_data = user_data;
-        self.allocator = allocator;
-        return self;
+const StatusChange = struct {
+    fn truncatedArgsTuple(comptime T: type) type {
+        var info = @typeInfo(std.meta.ArgsTuple(T));
+        info.@"struct".fields = info.@"struct".fields[0 .. info.@"struct".fields.len - 3];
+        return @Type(info);
     }
 
-    fn destroy_data(data: ?*anyopaque, _: ?*gio.GClosure) callconv(.c) void {
-        const self: *StatusChangeClosure = @ptrCast(@alignCast(data));
-        self.allocator.destroy(self);
-    }
+    fn Closure(comptime T: type) type {
+        return struct {
+            const PreArgs = truncatedArgsTuple(T);
+            callback: *const T,
+            pre_args: PreArgs,
+            allocator: std.mem.Allocator,
 
-    fn c_handler(_: *gio.GDBusProxy, _: [*:0]u8, _: [*:0]u8, parameters: *gio.GVariant, user_data: ?*anyopaque) callconv(.c) void {
-        var major: u32 = undefined;
-        var minor: u32 = undefined;
-        var message: [*:0]u8 = undefined;
-        gio.g_variant_get(parameters, "(uus)", &major, &minor, &message);
-        defer gio.g_free(message);
-        const self: *StatusChangeClosure = @ptrCast(@alignCast(user_data));
-        self.user_callback(self.user_data, major, minor, std.mem.span(message));
+            fn init(allocator: std.mem.Allocator, callback: *const T, user_data: PreArgs) !*@This() {
+                const self = try allocator.create(@This());
+                self.callback = callback;
+                self.pre_args = user_data;
+                self.allocator = allocator;
+                return self;
+            }
+
+            fn destroy_data(data: ?*anyopaque, _: ?*gio.GClosure) callconv(.c) void {
+                const self: *@This() = @ptrCast(@alignCast(data));
+                self.allocator.destroy(self);
+            }
+
+            fn c_handler(_: *gio.GDBusProxy, _: [*:0]u8, _: [*:0]u8, parameters: *gio.GVariant, user_data: ?*anyopaque) callconv(.c) void {
+                var major: u32 = undefined;
+                var minor: u32 = undefined;
+                var message: [*:0]u8 = undefined;
+                gio.g_variant_get(parameters, "(uus)", &major, &minor, &message);
+                defer gio.g_free(message);
+                const self: *@This() = @ptrCast(@alignCast(user_data));
+                @call(.auto, self.callback, self.pre_args ++ .{ major, minor, std.mem.span(message) });
+            }
+        };
     }
 };
 
@@ -240,9 +250,10 @@ pub const Session = struct {
 
     pub fn listenToStatusChange(
         self: *Session,
-        callback: StatusChangeCallback,
-        user_data: ?*anyopaque,
+        callback: anytype,
+        pre_args: StatusChange.truncatedArgsTuple(@TypeOf(callback)),
     ) !void {
+        const Closure = StatusChange.Closure(@TypeOf(callback));
         var g_error: ?*gio.GError = null;
         const result = gio.g_dbus_proxy_call_sync(
             self.proxy,
@@ -271,9 +282,9 @@ pub const Session = struct {
         _ = gio.g_signal_connect_data(
             self.log_proxy.?,
             "g-signal::StatusChange",
-            gio.G_CALLBACK(StatusChangeClosure.c_handler),
-            try StatusChangeClosure.init(self.allocator, callback, user_data),
-            StatusChangeClosure.destroy_data,
+            gio.G_CALLBACK(Closure.c_handler),
+            try Closure.init(self.allocator, callback, pre_args),
+            Closure.destroy_data,
             gio.G_CONNECT_DEFAULT,
         );
     }
