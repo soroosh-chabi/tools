@@ -44,7 +44,20 @@ fn sigIntHandler(user_data: ?*anyopaque) callconv(.c) gio.gboolean {
 }
 
 fn statusChangedHandler(major: u32, minor: u32, message: []const u8) void {
-    std.debug.print("Status Changed. {d}.{d}: {s}\n", .{ major, minor, message });
+    const stdOut = std.io.getStdOut().writer();
+    if (major == 2) {
+        switch (minor) {
+            2, 16 => return,
+            6 => stdOut.writeAll("Connecting...\n") catch {},
+            7 => stdOut.writeAll("Connected.\n") catch {},
+            8 => stdOut.writeAll("Disconnecting...\n") catch {},
+            9 => stdOut.writeAll("Disconnected.\n") catch {},
+            11 => stdOut.writeAll("Authentication failed. Disconnecting...\n") catch {},
+            else => stdOut.print("Status change: {d}.{d}: {s}\n", .{ major, minor, message }) catch {},
+        }
+    } else {
+        stdOut.print("Status change: {d}.{d}: {s}\n", .{ major, minor, message }) catch {};
+    }
 }
 
 fn connect(allocator: std.mem.Allocator, session: client.Session, creds: credentials.Credentials) !void {
