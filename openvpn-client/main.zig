@@ -26,7 +26,7 @@ pub fn main() !void {
     config_path = (try config_manager.LookupConfigName(allocator, creds.config_name)).?;
     defer allocator.free(config_path);
 
-    session = try session_manager.createNewTunnel(allocator, config_path);
+    try startSession();
     defer session.deinit();
     defer session.disconnect() catch {};
 
@@ -35,13 +35,17 @@ pub fn main() !void {
 
     _ = gio.g_unix_signal_add(std.os.linux.SIG.INT, sigIntHandler, main_loop);
 
+    gio.g_main_loop_run(main_loop);
+}
+
+fn startSession() !void {
+    session = try session_manager.createNewTunnel(allocator, config_path);
+
     try session.listenToStatusChange(statusChangedHandler, .{});
     try session.listenToAttentionRequired(attentionRequiredHandler, .{});
 
     const thread = try std.Thread.spawn(.{}, connect, .{});
     defer thread.join();
-
-    gio.g_main_loop_run(main_loop);
 }
 
 fn sigIntHandler(user_data: ?*anyopaque) callconv(.c) gio.gboolean {
