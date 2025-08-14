@@ -154,11 +154,16 @@ pub const SessionManager = struct {
 
 fn PreArgsClosure(comptime T: type, comptime post_args_len: usize) type {
     var info = @typeInfo(std.meta.ArgsTuple(T));
-    var post_args_info = info;
+    var post_args_fields: [post_args_len]std.builtin.Type.StructField = undefined;
+    for (info.@"struct".fields[info.@"struct".fields.len - post_args_len ..], 0..) |field, i| {
+        post_args_fields[i] = field;
+        var num_buf: [128]u8 = undefined;
+        post_args_fields[i].name = std.fmt.bufPrintZ(&num_buf, "{d}", .{i}) catch unreachable;
+    }
     info.@"struct".fields = info.@"struct".fields[0 .. info.@"struct".fields.len - post_args_len];
     const PreArgs = @Type(info);
-    post_args_info.@"struct".fields = post_args_info.@"struct".fields[post_args_info.@"struct".fields.len - post_args_len ..];
-    const PostArgs = @Type(post_args_info);
+    info.@"struct".fields = &post_args_fields;
+    const PostArgs = @Type(info);
     const PostArgsExtractor = fn (*gio.GDBusProxy, [*:0]u8, [*:0]u8, *gio.GVariant) PostArgs;
     const PostArgsDeinit = fn (PostArgs) void;
 
@@ -233,6 +238,10 @@ pub const Session = struct {
 
     pub fn disconnect(self: Session) !void {
         gio.g_variant_unref(try callWithRetry(self.proxy, "Disconnect", null));
+    }
+
+    pub fn ready(self: Session) !void {
+        gio.g_variant_unref(try callWithRetry(self.proxy, "Ready", null));
     }
 
     pub fn setInputs(

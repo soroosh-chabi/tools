@@ -29,7 +29,7 @@ pub fn main() !void {
 
     _ = gio.g_unix_signal_add(std.os.linux.SIG.INT, sigIntHandler, main_loop);
 
-    try session.listenToStatusChange(statusChangedHandler, .{});
+    try session.listenToStatusChange(statusChangedHandler, .{session});
     try session.listenToAttentionRequired(attentionRequiredHandler, .{});
 
     const thread = try std.Thread.spawn(.{}, connect, .{ allocator, session, creds });
@@ -44,7 +44,7 @@ fn sigIntHandler(user_data: ?*anyopaque) callconv(.c) gio.gboolean {
     return gio.FALSE;
 }
 
-fn statusChangedHandler(major: u32, minor: u32, message: []const u8) void {
+fn statusChangedHandler(session: client.Session, major: u32, minor: u32, message: []const u8) void {
     const stdOut = std.io.getStdOut().writer();
     if (major == 2) {
         switch (minor) {
@@ -53,7 +53,14 @@ fn statusChangedHandler(major: u32, minor: u32, message: []const u8) void {
             7 => stdOut.writeAll("Connected.\n") catch {},
             8 => stdOut.writeAll("Disconnecting...\n") catch {},
             9 => stdOut.writeAll("Disconnected.\n") catch {},
-            11 => stdOut.writeAll("Authentication failed. Disconnecting...\n") catch {},
+            11 => {
+                stdOut.writeAll("Authentication failed ") catch {};
+                if (session.ready()) {
+                    stdOut.writeAll("but ready!\n") catch {};
+                } else |_| {
+                    stdOut.writeAll("and not ready.\n") catch {};
+                }
+            },
             else => stdOut.print("Status change: {d}.{d}: {s}\n", .{ major, minor, message }) catch {},
         }
     } else {
