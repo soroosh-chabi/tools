@@ -3,24 +3,30 @@ const gio = @import("clibs.zig").gio;
 const credentials = @import("credentials.zig");
 const client = @import("client.zig");
 
+var allocator: std.mem.Allocator = undefined;
+var config_path: []const u8 = undefined;
+var session_manager: client.SessionManager = undefined;
+var session: client.Session = undefined;
+var creds: credentials.Credentials = undefined;
+
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
+    allocator = gpa.allocator();
 
-    const creds = try credentials.getCredentials(allocator);
+    creds = try credentials.getCredentials(allocator);
     defer creds.deinit();
 
     var config_manager = try client.ConfigManager.init();
     defer config_manager.deinit();
 
-    var session_manager = try client.SessionManager.init();
+    session_manager = try client.SessionManager.init();
     defer session_manager.deinit();
 
-    const config_path = (try config_manager.LookupConfigName(allocator, creds.config_name)).?;
+    config_path = (try config_manager.LookupConfigName(allocator, creds.config_name)).?;
     defer allocator.free(config_path);
 
-    var session = try session_manager.createNewTunnel(allocator, config_path);
+    session = try session_manager.createNewTunnel(allocator, config_path);
     defer session.deinit();
     defer session.disconnect() catch {};
 
@@ -29,10 +35,10 @@ pub fn main() !void {
 
     _ = gio.g_unix_signal_add(std.os.linux.SIG.INT, sigIntHandler, main_loop);
 
-    try session.listenToStatusChange(statusChangedHandler, .{session});
+    try session.listenToStatusChange(statusChangedHandler, .{});
     try session.listenToAttentionRequired(attentionRequiredHandler, .{});
 
-    const thread = try std.Thread.spawn(.{}, connect, .{ allocator, session, creds });
+    const thread = try std.Thread.spawn(.{}, connect, .{});
     defer thread.join();
 
     gio.g_main_loop_run(main_loop);
@@ -44,7 +50,7 @@ fn sigIntHandler(user_data: ?*anyopaque) callconv(.c) gio.gboolean {
     return gio.FALSE;
 }
 
-fn statusChangedHandler(session: client.Session, major: u32, minor: u32, message: []const u8) void {
+fn statusChangedHandler(major: u32, minor: u32, message: []const u8) void {
     const stdOut = std.io.getStdOut().writer();
     stdOut.writeAll("Status change: ") catch {};
     if (major == 2) {
@@ -74,8 +80,8 @@ fn attentionRequiredHandler(@"type": u32, group: u32, message: []const u8) void 
     std.debug.print("Attention required: {d}.{d}: {s}\n", .{ @"type", group, message });
 }
 
-fn connect(allocator: std.mem.Allocator, session: client.Session, creds: credentials.Credentials) !void {
-    const totp = try generateTotp(allocator, creds.totp_secret);
+fn connect() !void {
+    const totp = try generateTotp(creds.totp_secret);
     defer allocator.free(totp);
     try session.setInputs(.{
         .username = creds.username,
@@ -85,7 +91,7 @@ fn connect(allocator: std.mem.Allocator, session: client.Session, creds: credent
     try session.connect();
 }
 
-fn generateTotp(allocator: std.mem.Allocator, totp_secret: []const u8) ![]u8 {
+fn generateTotp(totp_secret: []const u8) ![]u8 {
     // Build oathtool command
     const argv = [_][]const u8{
         "oathtool",
