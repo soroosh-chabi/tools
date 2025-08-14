@@ -46,26 +46,27 @@ fn sigIntHandler(user_data: ?*anyopaque) callconv(.c) gio.gboolean {
 
 fn statusChangedHandler(session: client.Session, major: u32, minor: u32, message: []const u8) void {
     const stdOut = std.io.getStdOut().writer();
+    stdOut.writeAll("Status change: ") catch {};
     if (major == 2) {
         switch (minor) {
             2, 16 => return,
-            6 => stdOut.writeAll("Connecting...\n") catch {},
-            7 => stdOut.writeAll("Connected.\n") catch {},
-            8 => stdOut.writeAll("Disconnecting...\n") catch {},
-            9 => stdOut.writeAll("Disconnected.\n") catch {},
+            6 => stdOut.writeAll("connecting...\n") catch {},
+            7 => stdOut.writeAll("connected.\n") catch {},
+            8 => stdOut.writeAll("disconnecting...\n") catch {},
+            9 => stdOut.writeAll("disconnected.\n") catch {},
             11 => {
-                stdOut.writeAll("Authentication failed ") catch {};
+                stdOut.writeAll("authentication failed ") catch {};
                 if (session.ready()) {
                     stdOut.writeAll("but ready!\n") catch {};
                 } else |_| {
                     stdOut.writeAll("and not ready.\n") catch {};
                 }
             },
-            12 => stdOut.writeAll("Reconnecting...\n") catch {},
-            else => stdOut.print("Status change: {d}.{d}: {s}\n", .{ major, minor, message }) catch {},
+            12 => stdOut.writeAll("reconnecting...\n") catch {},
+            else => stdOut.print("{d}.{d}: {s}\n", .{ major, minor, message }) catch {},
         }
     } else {
-        stdOut.print("Status change: {d}.{d}: {s}\n", .{ major, minor, message }) catch {};
+        stdOut.print("{d}.{d}: {s}\n", .{ major, minor, message }) catch {};
     }
 }
 
