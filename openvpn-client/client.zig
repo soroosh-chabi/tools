@@ -228,23 +228,30 @@ pub const Session = struct {
         gio.g_variant_unref(try callWithRetry(self.proxy, "Disconnect", null));
     }
 
-    pub fn setInputs(self: Session) !void {
+    pub fn setInputs(
+        self: Session,
+        credentials: struct { username: []const u8, password: []const u8, totp: []const u8 },
+    ) !void {
+        const username_c = try self.allocator.dupeZ(u8, credentials.username);
+        defer self.allocator.free(username_c);
+        const password_c = try self.allocator.dupeZ(u8, credentials.password);
+        defer self.allocator.free(password_c);
+        const totp_c = try self.allocator.dupeZ(u8, credentials.totp);
+        defer self.allocator.free(totp_c);
         gio.g_variant_unref(try callWithRetry(
             self.proxy,
             "UserInputProvide",
-            gio.g_variant_new("(uuus)", @as(u32, 1), @as(u32, 1), @as(u32, 0), self.username.?),
+            gio.g_variant_new("(uuus)", @as(u32, 1), @as(u32, 1), @as(u32, 0), username_c.ptr),
         ));
         gio.g_variant_unref(try callWithRetry(
             self.proxy,
             "UserInputProvide",
-            gio.g_variant_new("(uuus)", @as(u32, 1), @as(u32, 1), @as(u32, 1), self.password.?),
+            gio.g_variant_new("(uuus)", @as(u32, 1), @as(u32, 1), @as(u32, 1), password_c.ptr),
         ));
-        const totp = try self.generateTotp();
-        defer self.allocator.free(std.mem.span(totp));
         gio.g_variant_unref(try callWithRetry(
             self.proxy,
             "UserInputProvide",
-            gio.g_variant_new("(uuus)", @as(u32, 1), @as(u32, 4), @as(u32, 0), totp),
+            gio.g_variant_new("(uuus)", @as(u32, 1), @as(u32, 4), @as(u32, 0), totp_c.ptr),
         ));
     }
 

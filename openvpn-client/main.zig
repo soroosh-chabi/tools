@@ -31,7 +31,7 @@ pub fn main() !void {
 
     try session.listenToStatusChange(statusChangedHandler, .{});
 
-    const thread = try std.Thread.spawn(.{}, client.Session.connect, .{session});
+    const thread = try std.Thread.spawn(.{}, connect, .{ allocator, session, creds });
     defer thread.join();
 
     gio.g_main_loop_run(main_loop);
@@ -45,6 +45,17 @@ fn sigIntHandler(user_data: ?*anyopaque) callconv(.c) gio.gboolean {
 
 fn statusChangedHandler(major: u32, minor: u32, message: []const u8) void {
     std.debug.print("Status Changed. {d}.{d}: {s}\n", .{ major, minor, message });
+}
+
+fn connect(allocator: std.mem.Allocator, session: client.Session, creds: credentials.Credentials) !void {
+    const totp = try generateTotp(allocator, creds.totp_secret);
+    defer allocator.free(totp);
+    try session.setInputs(.{
+        .username = creds.username,
+        .password = creds.password,
+        .totp = totp,
+    });
+    try session.connect();
 }
 
 fn generateTotp(allocator: std.mem.Allocator, totp_secret: []const u8) ![]u8 {
@@ -63,11 +74,11 @@ fn generateTotp(allocator: std.mem.Allocator, totp_secret: []const u8) ![]u8 {
         .argv = &argv,
     });
     defer allocator.free(result.stderr);
-    errdefer allocator.free(result.stdout);
+    defer allocator.free(result.stdout);
     if (result.stderr.len > 0) {
         try std.io.getStdOut().writer().print("Generating TOTP failed: {s}\n", .{result.stderr});
         return error.TOTPError;
     }
     // Trim newline
-    return result.stdout[0 .. result.stdout.len - 1];
+    return try allocator.dupe(u8, result.stdout[0 .. result.stdout.len - 1]);
 }
