@@ -152,6 +152,36 @@ pub const SessionManager = struct {
     }
 };
 
+pub const StatusChangeCallback = *const fn (user_data: ?*anyopaque, major: u32, minor: u32, message: []const u8) void;
+const StatusChangeClosure = struct {
+    user_callback: StatusChangeCallback,
+    user_data: ?*anyopaque,
+    allocator: std.mem.Allocator,
+
+    fn init(allocator: std.mem.Allocator, user_callback: StatusChangeCallback, user_data: ?*anyopaque) !*StatusChangeClosure {
+        const self = try allocator.create(StatusChangeClosure);
+        self.user_callback = user_callback;
+        self.user_data = user_data;
+        self.allocator = allocator;
+        return self;
+    }
+
+    fn destroy_data(data: ?*anyopaque, _: ?*gio.GClosure) callconv(.c) void {
+        const self: *StatusChangeClosure = @ptrCast(@alignCast(data));
+        self.allocator.destroy(self);
+    }
+
+    fn c_handler(_: *gio.GDBusProxy, _: [*:0]u8, _: [*:0]u8, parameters: *gio.GVariant, user_data: ?*anyopaque) callconv(.c) void {
+        var major: u32 = undefined;
+        var minor: u32 = undefined;
+        var message: [*:0]u8 = undefined;
+        gio.g_variant_get(parameters, "(uus)", &major, &minor, &message);
+        defer gio.g_free(message);
+        const self: *StatusChangeClosure = @ptrCast(@alignCast(user_data));
+        self.user_callback(self.user_data, major, minor, std.mem.span(message));
+    }
+};
+
 pub const Session = struct {
     proxy: *gio.GDBusProxy,
     log_proxy: ?*gio.GDBusProxy = null,
@@ -210,7 +240,7 @@ pub const Session = struct {
 
     pub fn listenToStatusChange(
         self: *Session,
-        callback: *const fn (_: *gio.GDBusProxy, _: [*:0]u8, _: [*:0]u8, _: *gio.GVariant, _: ?*anyopaque) callconv(.c) void,
+        callback: StatusChangeCallback,
         user_data: ?*anyopaque,
     ) !void {
         var g_error: ?*gio.GError = null;
@@ -225,25 +255,26 @@ pub const Session = struct {
         );
         try reportGError(g_error);
         gio.g_variant_unref(result);
-        self.log_proxy = gio.g_dbus_proxy_new_for_bus_sync(
-            gio.G_BUS_TYPE_SYSTEM,
-            gio.G_DBUS_PROXY_FLAGS_NONE,
-            null,
-            "net.openvpn.v3.log",
-            gio.g_dbus_proxy_get_object_path(self.proxy),
-            "net.openvpn.v3.backends",
-            null,
-            &g_error,
-        );
-        try reportGError(g_error);
-        if (gio.g_signal_connect_data(
+        if (self.log_proxy == null) {
+            self.log_proxy = gio.g_dbus_proxy_new_for_bus_sync(
+                gio.G_BUS_TYPE_SYSTEM,
+                gio.G_DBUS_PROXY_FLAGS_NONE,
+                null,
+                "net.openvpn.v3.log",
+                gio.g_dbus_proxy_get_object_path(self.proxy),
+                "net.openvpn.v3.backends",
+                null,
+                &g_error,
+            );
+            try reportGError(g_error);
+        }
+        _ = gio.g_signal_connect_data(
             self.log_proxy.?,
             "g-signal::StatusChange",
-            gio.G_CALLBACK(callback),
-            user_data,
-            null,
+            gio.G_CALLBACK(StatusChangeClosure.c_handler),
+            try StatusChangeClosure.init(self.allocator, callback, user_data),
+            StatusChangeClosure.destroy_data,
             gio.G_CONNECT_DEFAULT,
-        ) <= 0)
-            return error.GError;
+        );
     }
 };

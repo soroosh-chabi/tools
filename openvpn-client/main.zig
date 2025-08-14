@@ -43,12 +43,7 @@ fn sigIntHandler(user_data: ?*anyopaque) callconv(.c) gio.gboolean {
     return gio.FALSE;
 }
 
-fn statusChangedHandler(_: *gio.GDBusProxy, _: [*:0]u8, _: [*:0]u8, parameters: *gio.GVariant, _: ?*anyopaque) callconv(.c) void {
-    var major: u32 = undefined;
-    var minor: u32 = undefined;
-    var message: [*:0]u8 = undefined;
-    gio.g_variant_get(parameters, "(uus)", &major, &minor, &message);
-    defer gio.g_free(message);
+fn statusChangedHandler(_: ?*anyopaque, major: u32, minor: u32, message: []const u8) void {
     std.debug.print("Status Changed. {d}.{d}: {s}\n", .{ major, minor, message });
 }
 
