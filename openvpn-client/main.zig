@@ -3,6 +3,10 @@ const gio = @import("clibs.zig").gio;
 const credentials = @import("credentials.zig");
 const client = @import("client.zig");
 
+pub const std_options = std.Options{
+    .logFn = timedLog,
+};
+
 var allocator: std.mem.Allocator = undefined;
 var config_path: []const u8 = undefined;
 var session_manager: client.SessionManager = undefined;
@@ -36,6 +40,19 @@ pub fn main() !void {
     _ = gio.g_unix_signal_add(std.os.linux.SIG.INT, sigIntHandler, null);
 
     gio.g_main_loop_run(main_loop);
+}
+
+pub fn timedLog(
+    comptime level: std.log.Level,
+    comptime scope: @Type(.enum_literal),
+    comptime format: []const u8,
+    args: anytype,
+) void {
+    const now = gio.g_date_time_new_now_local();
+    defer gio.g_date_time_unref(now);
+    const now_str = gio.g_date_time_format(now, "%H:%M");
+    defer gio.g_free(now_str);
+    std.log.defaultLog(level, scope, "({s}) " ++ format, .{now_str} ++ args);
 }
 
 fn startSession() !void {
