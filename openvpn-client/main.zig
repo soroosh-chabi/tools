@@ -13,6 +13,7 @@ var session_manager: client.SessionManager = undefined;
 var session: ?client.Session = null;
 var creds: credentials.Credentials = undefined;
 var main_loop: *gio.GMainLoop = undefined;
+var connect_thread: ?std.Thread = null;
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -56,17 +57,19 @@ pub fn timedLog(
 }
 
 fn startSession() !void {
-    endSession();
     session = try session_manager.createNewTunnel(allocator, config_path);
 
     try session.?.listenToStatusChange(statusChangedHandler, .{});
     try session.?.listenToAttentionRequired(attentionRequiredHandler, .{});
 
-    const thread = try std.Thread.spawn(.{}, connect, .{});
-    defer thread.join();
+    connect_thread = try std.Thread.spawn(.{}, connect, .{});
 }
 
 fn endSession() void {
+    if (connect_thread) |t|
+        t.join();
+    connect_thread = null;
+
     if (session) |s| {
         s.disconnect() catch {};
         s.deinit();
@@ -95,6 +98,7 @@ fn statusChangedHandler(major: u32, minor: u32, message: []const u8) void {
             8 => stdOut.writeAll("disconnecting...\n") catch {},
             9 => {
                 stdOut.writeAll("disconnected.\n") catch {};
+                endSession();
                 startSession() catch {
                     stdOut.writeAll("Failed to reconnect.\n") catch {};
                     quit();
