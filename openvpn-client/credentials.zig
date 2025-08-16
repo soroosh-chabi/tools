@@ -128,6 +128,31 @@ pub const Credentials = struct {
             .config_name = config_name,
         };
     }
+
+    pub fn generateTotp(self: Credentials) ![]u8 {
+        // Build oathtool command
+        const argv = [_][]const u8{
+            "oathtool",
+            "--totp",
+            "-d6",
+            "-b",
+            self.totp_secret,
+        };
+
+        // Execute oathtool and capture output
+        const result = try std.process.Child.run(.{
+            .allocator = self.allocator,
+            .argv = &argv,
+        });
+        defer self.allocator.free(result.stderr);
+        defer self.allocator.free(result.stdout);
+        if (result.stderr.len > 0) {
+            try std.io.getStdOut().writer().print("Generating TOTP failed: {s}\n", .{result.stderr});
+            return error.TOTPError;
+        }
+        // Trim newline
+        return try self.allocator.dupe(u8, result.stdout[0 .. result.stdout.len - 1]);
+    }
 };
 
 const EncryptedCredentialsFile = struct {

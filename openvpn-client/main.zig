@@ -125,7 +125,7 @@ fn attentionRequiredHandler(@"type": u32, group: u32, message: []const u8) void 
 }
 
 fn connect() !void {
-    const totp = try generateTotp(creds.totp_secret);
+    const totp = try creds.generateTotp();
     defer allocator.free(totp);
     try session.?.setInputs(.{
         .username = creds.username,
@@ -133,29 +133,4 @@ fn connect() !void {
         .totp = totp,
     });
     try session.?.connect();
-}
-
-fn generateTotp(totp_secret: []const u8) ![]u8 {
-    // Build oathtool command
-    const argv = [_][]const u8{
-        "oathtool",
-        "--totp",
-        "-d6",
-        "-b",
-        totp_secret,
-    };
-
-    // Execute oathtool and capture output
-    const result = try std.process.Child.run(.{
-        .allocator = allocator,
-        .argv = &argv,
-    });
-    defer allocator.free(result.stderr);
-    defer allocator.free(result.stdout);
-    if (result.stderr.len > 0) {
-        try std.io.getStdOut().writer().print("Generating TOTP failed: {s}\n", .{result.stderr});
-        return error.TOTPError;
-    }
-    // Trim newline
-    return try allocator.dupe(u8, result.stdout[0 .. result.stdout.len - 1]);
 }
